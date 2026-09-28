@@ -471,6 +471,14 @@ int main(int argc, char* argv[])
 		// SDL3GameEngine.cpp; SDL's automatic touch->mouse synthesis would
 		// double-deliver finger 1 and fight the two-finger pan logic.
 		SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+		// GeneralsX @bugfix seastwood 28/09/2026 Declare the landscape-only orientation to SDL.
+		// Without this hint SDL treats a resizable window as supporting every orientation: its
+		// view controller then allows portrait, and a window created while the device is held
+		// upright is sized and laid out in portrait. On iOS 26+ the game then rendered into a
+		// portrait swapchain (squished into the left of an iPhone) or collapsed into a corner
+		// after a device reset (iPad). With the hint SDL creates the window landscape and the
+		// view controller only rotates between the two landscape orientations.
+		SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 #endif
 		if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
 			fprintf(stderr, "FATAL: Failed to initialize SDL3: %s\n", SDL_GetError());
