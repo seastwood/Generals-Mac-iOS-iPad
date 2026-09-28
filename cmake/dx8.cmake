@@ -72,6 +72,13 @@ elseif(APPLE AND SAGE_USE_MOLTENVK)
     # already carries it (reverse-check passes), fail the configure otherwise
     # so an unpatched DXVK can never ship silently.
     if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+      # GeneralsX @build seastwood 28/09/2026 Fail at configure time when the fork's nested
+      # header submodules are missing; the iOS cross build cannot fall back to system
+      # Vulkan headers, so meson otherwise stops mid-build with "Missing Vulkan-Headers".
+      if(NOT EXISTS "${DXVK_LOCAL_FORK_DIR}/include/vulkan/include/vulkan/vulkan.h"
+         OR NOT EXISTS "${DXVK_LOCAL_FORK_DIR}/include/spirv/include/spirv")
+        message(FATAL_ERROR "references/fbraz3-dxvk is missing its Vulkan/SPIR-V header submodules. Run: git submodule update --init --recursive references/fbraz3-dxvk")
+      endif()
       execute_process(
         COMMAND git -C "${DXVK_LOCAL_FORK_DIR}" apply --reverse --check "${CMAKE_SOURCE_DIR}/Patches/dxvk-ios.patch"
         RESULT_VARIABLE DXVK_PATCH_ALREADY_APPLIED
@@ -91,7 +98,7 @@ elseif(APPLE AND SAGE_USE_MOLTENVK)
   elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     # The remote clone has no way to receive the iOS patch; a silent fallback
     # here previously produced dylibs that die at Vulkan init on device.
-    message(FATAL_ERROR "iOS DXVK requires the local fork submodule. Run: git submodule update --init references/fbraz3-dxvk")
+    message(FATAL_ERROR "iOS DXVK requires the local fork submodule. Run: git submodule update --init --recursive references/fbraz3-dxvk")
   else()
     set(DXVK_SOURCE_DIR "${CMAKE_BINARY_DIR}/_deps/dxvk-src-fbraz3")
     message(STATUS "DXVK macOS build: using GitHub source clone at ${DXVK_SOURCE_DIR}")
