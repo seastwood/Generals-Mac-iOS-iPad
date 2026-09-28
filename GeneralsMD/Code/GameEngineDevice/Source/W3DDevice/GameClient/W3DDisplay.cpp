@@ -507,6 +507,25 @@ inline Bool isResolutionSupported(const ResolutionDescClass &res)
 
 // SDL3 display size providers for DX8Wrapper pillarbox (registered at init)
 #ifdef SAGE_USE_SDL3
+// GeneralsX @bugfix seastwood 28/09/2026 An iPad launched in portrait keeps reporting a portrait
+// window from SDL even though the landscape-only app is shown in landscape. A device reset (e.g.
+// entering the LAN lobby) then built a portrait backbuffer and pillarboxed the landscape game into
+// a corner, with input mapped to the wrong rect. The iOS app is landscape-only, so report the long
+// side as width.
+static void SDL3_NormalizeLandscape(int& w, int& h)
+{
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	if (h > w) {
+		const int tmp = w;
+		w = h;
+		h = tmp;
+	}
+#else
+	(void)w;
+	(void)h;
+#endif
+}
+
 static bool SDL3_GetNativeDisplaySize(int& outW, int& outH, float& outDensity)
 {
 	extern SDL_Window* TheSDL3Window;
@@ -517,6 +536,7 @@ static bool SDL3_GetNativeDisplaySize(int& outW, int& outH, float& outDensity)
 	outDensity = mode->pixel_density > 0 ? mode->pixel_density : 1.0f;
 	outW = (int)(mode->w * outDensity);
 	outH = (int)(mode->h * outDensity);
+	SDL3_NormalizeLandscape(outW, outH);
 	return true;
 }
 
@@ -531,6 +551,7 @@ static bool SDL3_GetWindowSizeInPixels(int& outW, int& outH, float& outDensity)
 	outW = physW;
 	outH = physH;
 	outDensity = (logW > 0) ? (float)physW / (float)logW : 1.0f;
+	SDL3_NormalizeLandscape(outW, outH);
 	return true;
 }
 
