@@ -90,23 +90,39 @@ cd ~/GeneralsX/GeneralsZH && ./run.sh -win
 
 ## Quick start — iPhone / iPad
 
-On top of the macOS prerequisites: full Xcode (signed into your Apple ID),
-`brew install xcodegen`, and a (free or paid) Apple Developer team.
+On top of the macOS prerequisites: full Xcode (signed into your Apple ID,
+selected with `xcode-select`, iOS platform installed), `brew install xcodegen`,
+and a free or paid Apple Developer team.
+
+**Using a free Apple ID?** Follow
+[docs/HOWTO/IOS_INSTALL_FREE_ACCOUNT.md](docs/HOWTO/IOS_INSTALL_FREE_ACCOUNT.md).
+It covers the one-time setup, finding your Team ID, and the one-command
+reinstall you need every 7 days.
 
 ```sh
 cd GeneralsX
-git submodule update --init --recursive references/fbraz3-dxvk   # iOS DXVK (+ its Vulkan/SPIR-V headers) is built from this + Patches/dxvk-ios.patch
-./scripts/build/ios/fetch-moltenvk.sh                # pinned MoltenVK.framework (checksummed)
-./scripts/build/ios/stage-fonts.sh                   # Liberation fonts, renamed as the game expects
+git submodule update --init --recursive references/fbraz3-dxvk
+./scripts/build/ios/fetch-moltenvk.sh
+./scripts/build/ios/stage-fonts.sh
 cmake --preset ios-vulkan
 cmake --build build/ios-vulkan --target z_generals
-GX_TEAM_ID=<your-team-id> GX_BUNDLE_ID=com.you.generalszh \
-    ./scripts/build/ios/package-ios-zh.sh --install  # assembles, signs, installs
+GX_TEAM_ID=YOUR_TEAM_ID GX_BUNDLE_ID=com.YOURNAME.generalszh \
+    ./scripts/build/ios/package-ios-zh.sh --install
 ```
 
-Find your team id in Xcode → Settings → Accounts. Assets ship inside the app
-bundle (self-contained install); `--dev` skips the ~2.7 GB copy for fast code
-iteration.
+`--recursive` fetches DXVK's Vulkan/SPIR-V headers; the iOS DXVK is built from
+that submodule plus `Patches/dxvk-ios.patch`. Your Team ID is the 10-character
+`OU=` value of your Apple Development certificate, not your email (the guide
+shows how to read it). Save `GX_TEAM_ID`, `GX_BUNDLE_ID` and optionally
+`GX_DEVICE_ID` in `ios/signing.env` (git-ignored) to run the package script
+without arguments. Assets ship inside the app bundle (self-contained install);
+`--dev` skips the ~2.7 GB copy for fast code iteration.
+
+**Free account: reinstall every 7 days** (keeps saves; don't delete the app):
+
+```sh
+cd GeneralsX && ./scripts/build/ios/package-ios-zh.sh --install
+```
 
 ## Where things are
 

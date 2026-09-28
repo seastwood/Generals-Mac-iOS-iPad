@@ -12,6 +12,8 @@
 #   5. Optional: install to the first connected device via devicectl.
 #
 # Usage: ./scripts/build/ios/package-ios-zh.sh [--dev] [--install]
+#   Signing settings come from GX_* environment variables or ios/signing.env
+#   (see docs/HOWTO/IOS_INSTALL_FREE_ACCOUNT.md).
 #   --dev      skip bundling the 2.7 GB of game assets (code-only iteration)
 #   --install  install the packaged app to the first connected device
 set -euo pipefail
@@ -33,6 +35,23 @@ IOS_DIR="${PROJECT_ROOT}/ios"
 DERIVED="${IOS_DIR}/build"
 OUT_DIR="${PROJECT_ROOT}/build/ios-package"
 APP_NAME="GeneralsXZH"
+
+# Per-machine signing settings (GX_TEAM_ID, GX_BUNDLE_ID, optional GX_DEVICE_ID) can be
+# saved once in ios/signing.env (git-ignored) so a reinstall needs no arguments.
+# Variables already set in the environment take precedence over the file.
+SIGNING_ENV="${IOS_DIR}/signing.env"
+if [[ -f "${SIGNING_ENV}" ]]; then
+    PRESET_TEAM_ID="${GX_TEAM_ID:-}"
+    PRESET_BUNDLE_ID="${GX_BUNDLE_ID:-}"
+    PRESET_DEVICE_ID="${GX_DEVICE_ID:-}"
+    # shellcheck source=/dev/null
+    source "${SIGNING_ENV}"
+    [[ -n "${PRESET_TEAM_ID}" ]] && GX_TEAM_ID="${PRESET_TEAM_ID}"
+    [[ -n "${PRESET_BUNDLE_ID}" ]] && GX_BUNDLE_ID="${PRESET_BUNDLE_ID}"
+    [[ -n "${PRESET_DEVICE_ID}" ]] && GX_DEVICE_ID="${PRESET_DEVICE_ID}"
+    echo "==> Using signing settings from ios/signing.env"
+fi
+
 IDENTITY="${GX_SIGN_IDENTITY:-Apple Development}"
 
 # Signing/bundle identity — override for your own Apple Developer account:
