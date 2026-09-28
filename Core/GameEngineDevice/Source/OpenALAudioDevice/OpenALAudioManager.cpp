@@ -1521,7 +1521,11 @@ Bool OpenALAudioManager::hasMusicTrackCompleted(const AsciiString& trackName, In
 //-------------------------------------------------------------------------------------------------
 void OpenALAudioManager::openDevice(void)
 {
+	// GeneralsX @bugfix seastwood 28/09/2026 Report audio startup in release builds too. DEBUG_LOG
+	// is compiled out there, so a device that failed to open left no trace in the log and "no sound"
+	// could not be told apart from a muted device.
 	if (!TheGlobalData->m_audioOn) {
+		fprintf(stderr, "INFO: OpenAL: audio disabled by settings, not opening a device\n");
 		return;
 	}
 
@@ -1534,6 +1538,7 @@ void OpenALAudioManager::openDevice(void)
 	m_alcDevice = alcOpenDevice(NULL);
 	if (m_alcDevice == nullptr) {
 		DEBUG_LOG(("Failed to open ALC device"));
+		fprintf(stderr, "ERROR: OpenAL: alcOpenDevice failed (0x%x), sound disabled\n", alcGetError(nullptr));
 		// if we couldn't initialize any devices, turn sound off (fail silently)
 		setOn(false, AudioAffect_All);
 		return;
@@ -1543,12 +1548,14 @@ void OpenALAudioManager::openDevice(void)
 	m_alcContext = alcCreateContext(m_alcDevice, attributes);
 	if (m_alcContext == nullptr) {
 		DEBUG_LOG(("Failed to create ALC context"));
+		fprintf(stderr, "ERROR: OpenAL: alcCreateContext failed (0x%x), sound disabled\n", alcGetError(m_alcDevice));
 		setOn(false, AudioAffect_All);
 		return;
 	}
 
 	if (!alcMakeContextCurrent(m_alcContext)) {
 		DEBUG_LOG(("Failed to make ALC context current"));
+		fprintf(stderr, "ERROR: OpenAL: alcMakeContextCurrent failed (0x%x), sound disabled\n", alcGetError(m_alcDevice));
 		setOn(false, AudioAffect_All);
 		return;
 	}
@@ -1561,6 +1568,9 @@ void OpenALAudioManager::openDevice(void)
 		alDebugMessageCallbackEXT(debugCallbackAL, nullptr);
 	}
 #endif // AL_EXT_debug
+
+	fprintf(stderr, "INFO: OpenAL: opened device '%s' (%s, %s)\n",
+		alcGetString(m_alcDevice, ALC_DEVICE_SPECIFIER), alGetString(AL_RENDERER), alGetString(AL_VERSION));
 
 	selectProvider(TheAudio->getProviderIndex(m_pref3DProvider));
 
