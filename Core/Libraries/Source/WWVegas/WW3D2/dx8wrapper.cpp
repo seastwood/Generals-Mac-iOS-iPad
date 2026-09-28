@@ -164,6 +164,16 @@ bool DX8Wrapper::Pillarbox_Setup(int gameW, int gameH)
 	int bbH = (int)_PresentParameters.BackBufferHeight;
 	float density = 1.0f;
 
+	// GeneralsX @bugfix seastwood 28/09/2026 The backbuffer is in pixels but mouse/touch events
+	// arrive in window points. Keep the window's pixel density even when the size comes from the
+	// present parameters, or Pillarbox_Get_Rect() reports a pixel rect for point input and every
+	// click on a high-density display (iOS) lands at roughly half its real position.
+	int winW = 0, winH = 0;
+	float winDensity = 1.0f;
+	if (GetWindowSize(winW, winH, winDensity) && winDensity > 0.0f) {
+		density = winDensity;
+	}
+
 	if (bbW <= 0 || bbH <= 0) {
 		if (!GetWindowSize(bbW, bbH, density)) {
 			if (!GetNativeDisplaySize(bbW, bbH, density)) {

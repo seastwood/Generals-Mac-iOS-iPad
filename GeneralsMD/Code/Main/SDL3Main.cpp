@@ -540,12 +540,16 @@ int main(int argc, char* argv[])
 			// the engine's resolution-aware font scaling (GlobalLanguage).
 			int winW = 0, winH = 0;
 			SDL_GetWindowSizeInPixels(TheSDL3Window, &winW, &winH);
-			if (!userSetRes && winW > 0 && winH > 0 && winW > winH) {
+			// GeneralsX @bugfix seastwood 28/09/2026 An iPad held in portrait at launch reports a
+			// portrait window here, before iOS rotates it to the landscape-only orientation. The
+			// injection used to be skipped then, leaving the engine at its 800x600 default behind a
+			// pillarbox. The app is landscape-only, so take the long side as width.
+			if (!userSetRes && winW > 0 && winH > 0) {
 				static char xresVal[16], yresVal[16];
 				static char xresFlag[] = "-xres";
 				static char yresFlag[] = "-yres";
-				const int yres = winH;
-				int xres = winW;
+				const int yres = (winW > winH) ? winH : winW;
+				int xres = (winW > winH) ? winW : winH;
 				xres &= ~1;  // keep it even
 				snprintf(xresVal, sizeof(xresVal), "%d", xres);
 				snprintf(yresVal, sizeof(yresVal), "%d", yres);
