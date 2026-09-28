@@ -204,13 +204,12 @@ echo "==> App ready: ${APP}"
 
 if [[ "${DO_INSTALL}" == "1" ]]; then
     echo "==> Installing to connected device"
-    DEVICE_ID=$(xcrun devicectl list devices 2>/dev/null | awk '/connected/{print $(NF-2); exit}')
+    # Match the identifier itself (UUID, or the 8-4 hex form some devices use):
+    # column positions shift when the model name has spaces, e.g. "iPad Pro (11-inch)".
+    DEVICE_ID="${GX_DEVICE_ID:-$(xcrun devicectl list devices 2>/dev/null | grep -i connected \
+        | grep -oE '[0-9A-Fa-f]{8}-([0-9A-Fa-f]{4}-){3}[0-9A-Fa-f]{12}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{16}' | head -1)}"
     if [[ -z "${DEVICE_ID}" ]]; then
-        # fall back: parse the identifier column (3rd-from-last varies with model names)
-        DEVICE_ID=$(xcrun devicectl list devices 2>/dev/null | grep -i connected | grep -oE '[0-9A-F-]{36}' | head -1)
-    fi
-    if [[ -z "${DEVICE_ID}" ]]; then
-        echo "ERROR: no connected device found (xcrun devicectl list devices)"
+        echo "ERROR: no connected device found (xcrun devicectl list devices); set GX_DEVICE_ID to override"
         exit 1
     fi
     xcrun devicectl device install app --device "${DEVICE_ID}" "${APP}"
