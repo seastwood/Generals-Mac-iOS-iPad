@@ -66,6 +66,20 @@ if [[ ! -d "${SHELL_APP}" ]]; then
     exit 1
 fi
 
+# Re-sign with the exact certificate Xcode used for the shell app (it matches the
+# provisioning profile). A name like "Apple Development" is ambiguous when the
+# keychain holds duplicate certificates, which makes codesign refuse to sign.
+if [[ -z "${GX_SIGN_IDENTITY:-}" ]]; then
+    CERT_DIR="$(mktemp -d)"
+    if codesign -d --extract-certificates="${CERT_DIR}/cert" "${SHELL_APP}" 2>/dev/null \
+        && [[ -f "${CERT_DIR}/cert0" ]]; then
+        IDENTITY="$(openssl x509 -inform DER -in "${CERT_DIR}/cert0" -noout -fingerprint -sha1 \
+            | cut -d= -f2 | tr -d :)"
+        echo "    signing identity from shell app: ${IDENTITY}"
+    fi
+    rm -rf "${CERT_DIR}"
+fi
+
 echo "==> Assembling final app"
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
