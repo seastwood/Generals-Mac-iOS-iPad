@@ -23,7 +23,7 @@
 **
 **   Keyboard button   tap: show / hide the on-screen keyboard
 **                     long-press, then drag: move it (the position is saved)
-**   Hotkey toolbar    a tab fixed in the top-right corner, in a game only; tap it to open or
+**   Hotkey toolbar    a tab fixed in the top-right corner (in the menus it only offers Opts); tap it to open or
 **                     close the toolbar (it stays as left, and is remembered). Buttons send the
 **                     game's own hotkey commands (no key bindings involved). Top row: All, Same,
 **                     Stop, Scatter, Home, Alert, Shift, Menu, Opts (settings page). Round buttons
@@ -497,7 +497,13 @@ const ToolbarButton COLUMN_BUTTONS[] = {
 	{ "5",    ACTION_GROUP, 5 },
 };
 
+// In the menus there are no units to command: only the settings.
+const ToolbarButton SHELL_BUTTONS[] = {
+	{ "Opts",    ACTION_OPEN_SETTINGS, 0 },
+};
+
 const Int MAIN_BUTTON_COUNT = (Int)(sizeof(MAIN_BUTTONS) / sizeof(MAIN_BUTTONS[0]));
+const Int SHELL_BUTTON_COUNT = (Int)(sizeof(SHELL_BUTTONS) / sizeof(SHELL_BUTTONS[0]));
 const Int SETTINGS_BUTTON_COUNT = (Int)(sizeof(SETTINGS_BUTTONS) / sizeof(SETTINGS_BUTTONS[0]));
 const Int COLUMN_BUTTON_COUNT = (Int)(sizeof(COLUMN_BUTTONS) / sizeof(COLUMN_BUTTONS[0]));
 
@@ -510,11 +516,20 @@ const Uint64 TOOLBAR_LONG_PRESS_MS = 500;
 
 bool s_settingsPage = false;
 
+bool inGame()
+{
+	return TheGameLogic != nullptr && TheGameLogic->isInGame() && !TheGameLogic->isInShellGame();
+}
+
 const ToolbarButton *currentButtons(Int &count)
 {
 	if (s_settingsPage) {
 		count = SETTINGS_BUTTON_COUNT;
 		return SETTINGS_BUTTONS;
+	}
+	if (!inGame()) {
+		count = SHELL_BUTTON_COUNT;
+		return SHELL_BUTTONS;
 	}
 	count = MAIN_BUTTON_COUNT;
 	return MAIN_BUTTONS;
@@ -604,8 +619,9 @@ std::string buttonLabel(const ToolbarButton &button)
 
 bool toolbarAvailable()
 {
-	// In a game only: the shell menus have no use for unit hotkeys.
-	return TheGameLogic != nullptr && TheGameLogic->isInGame() && !TheGameLogic->isInShellGame();
+	// Everywhere, so the settings are reachable from the menus too; the unit commands and the
+	// round buttons only appear in a game (currentButtons, layoutToolbar).
+	return TheGameLogic != nullptr;
 }
 
 void activateToolbarButton(const ToolbarButton &button, bool longPress)
@@ -710,8 +726,9 @@ void activateToolbarButton(const ToolbarButton &button, bool longPress)
 	playHaptic(bigAction ? 1 : 0);
 }
 
-// Lay the toolbar out for the current page. Labels are measured with the real font; when the row
-// does not fit the screen width the font and buttons shrink until it does.
+// Lay the toolbar out for the current page. Buttons keep their full size and wrap onto further
+// rows below the first, each row right-aligned against the tab; only when even that would take
+// more than three rows do the font and buttons shrink.
 void layoutToolbar(float screenW, float screenH)
 {
 	s_layout.valid = false;
@@ -724,69 +741,86 @@ void layoutToolbar(float screenW, float screenH)
 	const Insets insets = safeAreaInsets(screenW, screenH);
 	const float margin = screenH * 0.02f;
 	const float gap = SDL_max(4.0f, rowH * 0.12f);
-	Int pointSize = (Int)(rowH * 0.30f);
+	const Int pointSize = (Int)(rowH * 0.30f);
+
+	// The tab never moves: top-right corner, same size open or closed.
+	s_layout.tab.w = rowH * 2.0f;
+	s_layout.tab.h = rowH;
+	s_layout.tab.x = screenW - insets.right - s_layout.tab.w - margin;
+	s_layout.tab.y = insets.top + margin;
+
+	const float rowRight = s_layout.tab.x - gap;
+	const float available = SDL_max(rowH * 2.0f, rowRight - (insets.left + margin));
+	const Int MAX_ROWS = 3;
 
 	Int count = 0;
 	const ToolbarButton *buttons = currentButtons(count);
 	std::vector<float> widths((size_t)count, 0.0f);
+	std::vector<Int> rowOf((size_t)count, 0);
+	Int rows = 1;
 	float shrink = 1.0f;
-	float total = 0.0f;
 	for (Int attempt = 0; attempt < 8; ++attempt) {
 		if (!setLabelFontSize((Int)((float)pointSize * shrink))) {
 			return;
 		}
-		total = 0.0f;
+		rows = 1;
+		float used = 0.0f;
 		for (Int i = 0; i < count; ++i) {
 			Int textW = 0, textH = 0;
 			labelSize(buttonLabel(buttons[i]), textW, textH);
 			// Pills: room for the rounded ends on both sides of the label.
-			widths[(size_t)i] = SDL_max(rowH * shrink * 1.4f, (float)textW + rowH * shrink * 0.9f);
-			total += widths[(size_t)i];
+			const float width = SDL_max(rowH * shrink * 1.4f, (float)textW + rowH * shrink * 0.9f);
+			widths[(size_t)i] = width;
+			if (used > 0.0f && used + gap + width > available) {
+				++rows;
+				used = 0.0f;
+			}
+			used += (used > 0.0f ? gap : 0.0f) + width;
+			rowOf[(size_t)i] = rows - 1;
 		}
-		total += gap * (float)(count - 1);
-		if (total <= screenW - insets.left - insets.right - 2.0f * margin - rowH * 2.6f) {
+		if (rows <= MAX_ROWS) {
 			break;
 		}
 		shrink *= 0.88f;
 	}
 
-	const float buttonH = rowH * shrink;
-
-	// The tab never moves: top-right corner, same size open or closed.
-	Int hotkeysW = 0, hotkeysH = 0, hideW = 0, hideH = 0;
-	labelSize("Hotkeys", hotkeysW, hotkeysH);
-	labelSize("Hide", hideW, hideH);
-	const float tabTextW = (float)SDL_max(hotkeysW, hideW);
-	s_layout.tab.w = SDL_max(rowH * 1.8f, tabTextW + rowH * 0.9f);
-	s_layout.tab.h = rowH;
-	s_layout.tab.x = screenW - insets.right - s_layout.tab.w - margin;
-	s_layout.tab.y = insets.top + margin;
-
 	if (s_settings.toolbarOpen) {
-		// The button row sits to the left of the tab, right-aligned against it.
-		float x = s_layout.tab.x - gap - total;
+		const float buttonH = rowH * shrink;
+		std::vector<float> rowWidth((size_t)rows, 0.0f);
 		for (Int i = 0; i < count; ++i) {
+			float &width = rowWidth[(size_t)rowOf[(size_t)i]];
+			width += (width > 0.0f ? gap : 0.0f) + widths[(size_t)i];
+		}
+		std::vector<float> rowX((size_t)rows, 0.0f);
+		for (Int r = 0; r < rows; ++r) {
+			rowX[(size_t)r] = rowRight - rowWidth[(size_t)r];
+		}
+		for (Int i = 0; i < count; ++i) {
+			const Int row = rowOf[(size_t)i];
 			Rect rect;
-			rect.x = x;
-			rect.y = s_layout.tab.y + (rowH - buttonH) * 0.5f;
+			rect.x = rowX[(size_t)row];
+			rect.y = s_layout.tab.y + (float)row * (rowH + gap) + (rowH - buttonH) * 0.5f;
 			rect.w = widths[(size_t)i];
 			rect.h = buttonH;
 			s_layout.buttons.push_back(rect);
-			x += widths[(size_t)i] + gap;
+			rowX[(size_t)row] += widths[(size_t)i] + gap;
 		}
 
-		// The round buttons run down the right side under the tab, right edges aligned.
-		const float diameter = screenH * 0.085f * s_settings.scale;
-		const float columnGap = diameter * 0.2f;
-		float y = s_layout.tab.y + s_layout.tab.h + columnGap * 1.5f;
-		for (Int i = 0; i < COLUMN_BUTTON_COUNT; ++i) {
-			Rect rect;
-			rect.w = diameter;
-			rect.h = diameter;
-			rect.x = s_layout.tab.x + s_layout.tab.w - diameter;
-			rect.y = y;
-			s_layout.column.push_back(rect);
-			y += diameter + columnGap;
+		// The round buttons run down the right side under the tab, right edges aligned. They are
+		// unit commands, so only in a game.
+		if (inGame()) {
+			const float diameter = screenH * 0.085f * s_settings.scale;
+			const float columnGap = diameter * 0.2f;
+			float y = s_layout.tab.y + s_layout.tab.h + columnGap * 1.5f;
+			for (Int i = 0; i < COLUMN_BUTTON_COUNT; ++i) {
+				Rect rect;
+				rect.w = diameter;
+				rect.h = diameter;
+				rect.x = s_layout.tab.x + s_layout.tab.w - diameter;
+				rect.y = y;
+				s_layout.column.push_back(rect);
+				y += diameter + columnGap;
+			}
 		}
 	}
 	s_layout.valid = true;
@@ -1541,11 +1575,8 @@ void update(void)
 		releaseOneShotModifiers();
 	}
 
-	if (!toolbarAvailable()) {
-		if (s_ctrl != MODIFIER_OFF || s_shift != MODIFIER_OFF) {
-			releaseAllModifiers();
-		}
-		s_layout.valid = false;
+	if (!inGame() && (s_ctrl != MODIFIER_OFF || s_shift != MODIFIER_OFF)) {
+		releaseAllModifiers();
 	}
 }
 

@@ -236,6 +236,9 @@ screen.
 - **Autosave**: when you leave the app during a campaign or skirmish game, it
   saves to **Autosave** (in the Load menu), because iOS may close a
   backgrounded game at any time.
+- **Settings (Opts)**: tap **Hotkeys** in the top-right corner, then **Opts**
+  (last button of the top row; in the menus it is the only button). The
+  settings wrap onto a second row; **Back** returns to the hotkeys.
 - **Cursor mode** (Opts → **Cursor: On**): the screen works like a laptop
   trackpad with an on-screen arrow instead of tapping things directly.
   - Slide one finger to move the cursor; flick to send it gliding, and touch
