@@ -152,6 +152,7 @@ struct TouchState {
 	};
 
 	Phase phase = IDLE;
+	SDL_TouchID touch = 0;                // touch device finger1 belongs to
 	SDL_FingerID finger1 = 0;
 	SDL_FingerID finger2 = 0;
 	float downX = 0.0f, downY = 0.0f;   // finger1 down position (window points)
@@ -241,6 +242,7 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 			// drag-box, a long-press, or the first finger of a camera pan. A
 			// premature LMB down+up is a real click to the game (e.g. it sets a
 			// rally point when a production building is selected).
+			s_touch.touch = event.tfinger.touchID;
 			s_touch.finger1 = event.tfinger.fingerID;
 			s_touch.phase = TouchState::PENDING;
 			s_touch.downX = s_touch.lastX = px;
@@ -428,6 +430,24 @@ bool edgePanAvailable()
 // timers must be polled from the frame loop or they would never fire.
 void updateTouchLongPress(SDL3Mouse *mouse, SDL_Window *window)
 {
+	// GeneralsX @bugfix seastwood 29/09/2026 Recover from a lift that was never delivered. SDL on
+	// iOS identifies a finger by the address of its UITouch object, and UIKit reuses those
+	// addresses. When a finger's up event went missing, the gesture stayed in LONGPRESSED / PAN /
+	// EDGE_PAN, ignored every new touch, and only recovered once a later touch happened to reuse
+	// the same address and lift: touch input "stopped" for a random 10-30 seconds while the game
+	// kept running. Compare against the fingers SDL still tracks instead of waiting for an event.
+	if (s_touch.phase != TouchState::IDLE && !TouchOverlay::fingerIsDown(s_touch.touch, s_touch.finger1)) {
+		fprintf(stderr, "INFO: touch: finger lifted without an up event (gesture phase %d), resetting\n",
+		        (int)s_touch.phase);
+		if (s_touch.phase == TouchState::DRAGGING) {
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_touch.lastX, s_touch.lastY, SDL_BUTTON_LEFT);
+			TouchOverlay::onGameGestureEnded();
+		} else if (s_touch.phase == TouchState::PAN) {
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_touch.panX, s_touch.panY, SDL_BUTTON_RIGHT);
+		}
+		s_touch.phase = TouchState::IDLE;
+	}
+
 	if (s_touch.phase == TouchState::PENDING) {
 		const Uint64 held = SDL_GetTicks() - s_touch.downTicks;
 		float dirX = 0.0f, dirY = 0.0f;

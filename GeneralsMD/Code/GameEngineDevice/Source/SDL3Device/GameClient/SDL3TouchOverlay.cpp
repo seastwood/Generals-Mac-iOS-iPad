@@ -24,10 +24,12 @@
 **   Keyboard button   tap: show / hide the on-screen keyboard
 **                     long-press, then drag: move it (the position is saved)
 **   Hotkey toolbar    a tab fixed in the top-right corner, in a game only; tap it to open or
-**                     close the toolbar (it stays as left, and is remembered). Buttons send the game's own hotkey commands (no key bindings involved):
-**                     All, Same, Stop, Scatter, Home, Alert, groups 1-5 (tap: select, long-press:
-**                     assign the current selection), Ctrl / Shift (tap: held for the next tap on
-**                     the game, long-press: locked until tapped again), Menu, Opts (settings page)
+**                     close the toolbar (it stays as left, and is remembered). Buttons send the
+**                     game's own hotkey commands (no key bindings involved). Top row: All, Same,
+**                     Stop, Scatter, Home, Alert, Shift, Menu, Opts (settings page). Round buttons
+**                     down the right side: Ctrl, then groups 1-5 (tap: select, Ctrl + tap or
+**                     long-press: assign the current selection). Ctrl / Shift: tap = held for the
+**                     next tap on the game, long-press = locked until tapped again.
 **   Settings page     button size, opacity, keyboard button on/off, double-tap right-click,
 **                     edge scrolling, tap feedback rings
 **   Tap feedback      a short ring where each click lands (white: left, orange: right)
@@ -235,16 +237,6 @@ Color overlayColor(UnsignedByte r, UnsignedByte g, UnsignedByte b, float alpha)
 	return GameMakeColor(r, g, b, (UnsignedByte)a);
 }
 
-void fillRect(const Rect &rect, Color color)
-{
-	TheDisplay->drawFillRect((Int)rect.x, (Int)rect.y, (Int)rect.w, (Int)rect.h, color);
-}
-
-void outlineRect(const Rect &rect, Color color, float lineWidth)
-{
-	TheDisplay->drawOpenRect((Int)rect.x, (Int)rect.y, (Int)rect.w, (Int)rect.h, lineWidth, color);
-}
-
 // ---------------------------------------------------------------------------
 // Text labels (one cached DisplayString per label text)
 // ---------------------------------------------------------------------------
@@ -397,6 +389,7 @@ struct ToolbarButton {
 	Int value;
 };
 
+// Top row, to the left of the Hotkeys tab.
 const ToolbarButton MAIN_BUTTONS[] = {
 	{ "All",     ACTION_META,  GameMessage::MSG_META_SELECT_ALL },
 	{ "Same",    ACTION_META,  GameMessage::MSG_META_SELECT_MATCHING_UNITS },
@@ -404,12 +397,6 @@ const ToolbarButton MAIN_BUTTONS[] = {
 	{ "Scatter", ACTION_META,  GameMessage::MSG_META_SCATTER },
 	{ "Home",    ACTION_META,  GameMessage::MSG_META_VIEW_COMMAND_CENTER },
 	{ "Alert",   ACTION_META,  GameMessage::MSG_META_VIEW_LAST_RADAR_EVENT },
-	{ "1",       ACTION_GROUP, 1 },
-	{ "2",       ACTION_GROUP, 2 },
-	{ "3",       ACTION_GROUP, 3 },
-	{ "4",       ACTION_GROUP, 4 },
-	{ "5",       ACTION_GROUP, 5 },
-	{ "Ctrl",    ACTION_CTRL,  0 },
 	{ "Shift",   ACTION_SHIFT, 0 },
 	{ "Menu",    ACTION_META,  GameMessage::MSG_META_OPTIONS },
 	{ "Opts",    ACTION_OPEN_SETTINGS, 0 },
@@ -427,23 +414,59 @@ const ToolbarButton SETTINGS_BUTTONS[] = {
 	{ "Back",     ACTION_CLOSE_SETTINGS, 0 },
 };
 
+// Round buttons in a column down the right side, below the tab: Ctrl on top, then the groups.
+const ToolbarButton COLUMN_BUTTONS[] = {
+	{ "Ctrl", ACTION_CTRL,  0 },
+	{ "1",    ACTION_GROUP, 1 },
+	{ "2",    ACTION_GROUP, 2 },
+	{ "3",    ACTION_GROUP, 3 },
+	{ "4",    ACTION_GROUP, 4 },
+	{ "5",    ACTION_GROUP, 5 },
+};
+
 const Int MAIN_BUTTON_COUNT = (Int)(sizeof(MAIN_BUTTONS) / sizeof(MAIN_BUTTONS[0]));
 const Int SETTINGS_BUTTON_COUNT = (Int)(sizeof(SETTINGS_BUTTONS) / sizeof(SETTINGS_BUTTONS[0]));
+const Int COLUMN_BUTTON_COUNT = (Int)(sizeof(COLUMN_BUTTONS) / sizeof(COLUMN_BUTTONS[0]));
+
+// Button indices: row buttons use their index on the current page, column buttons are offset by
+// COLUMN_BASE, and the tab has its own id.
+const Int COLUMN_BASE = 100;
+const Int TAB_INDEX = -2;
 
 const Uint64 TOOLBAR_LONG_PRESS_MS = 500;
 
 bool s_settingsPage = false;
 
+const ToolbarButton *currentButtons(Int &count)
+{
+	if (s_settingsPage) {
+		count = SETTINGS_BUTTON_COUNT;
+		return SETTINGS_BUTTONS;
+	}
+	count = MAIN_BUTTON_COUNT;
+	return MAIN_BUTTONS;
+}
+
+const ToolbarButton *buttonForIndex(Int index)
+{
+	if (index >= COLUMN_BASE) {
+		const Int column = index - COLUMN_BASE;
+		return column < COLUMN_BUTTON_COUNT ? &COLUMN_BUTTONS[column] : nullptr;
+	}
+	Int count = 0;
+	const ToolbarButton *buttons = currentButtons(count);
+	return index >= 0 && index < count ? &buttons[index] : nullptr;
+}
+
 // Press feedback: a tap is often shorter than a frame, so a button that was just activated keeps
 // a bright highlight for a moment. Long-press actions (group assigned, key locked) flash green.
 const Uint64 FLASH_MS = 250;
 struct ButtonFlash {
-	Int index = -1;             // toolbar button index, or FLASH_TAB
-	bool settingsPage = false;  // page the index belongs to
+	Int index = -1;
+	bool settingsPage = false;  // page a row index belongs to
 	bool longPress = false;
 	Uint64 until = 0;
 };
-const Int FLASH_TAB = -2;
 ButtonFlash s_flash;
 
 void flashButton(Int index, bool longPress)
@@ -459,7 +482,7 @@ bool isFlashing(Int index, bool &longPress)
 	if (s_flash.index != index || SDL_GetTicks() >= s_flash.until) {
 		return false;
 	}
-	if (index != FLASH_TAB && s_flash.settingsPage != s_settingsPage) {
+	if (index >= 0 && index < COLUMN_BASE && s_flash.settingsPage != s_settingsPage) {
 		return false;
 	}
 	longPress = s_flash.longPress;
@@ -469,19 +492,10 @@ bool isFlashing(Int index, bool &longPress)
 struct ToolbarLayout {
 	bool valid = false;
 	Rect tab;
-	std::vector<Rect> buttons;   // buttons of the current page, empty while collapsed
+	std::vector<Rect> buttons;   // row buttons of the current page, empty while collapsed
+	std::vector<Rect> column;    // round buttons, empty while collapsed
 };
 ToolbarLayout s_layout;
-
-const ToolbarButton *currentButtons(Int &count)
-{
-	if (s_settingsPage) {
-		count = SETTINGS_BUTTON_COUNT;
-		return SETTINGS_BUTTONS;
-	}
-	count = MAIN_BUTTON_COUNT;
-	return MAIN_BUTTONS;
-}
 
 std::string onOff(const char *name, bool on)
 {
@@ -586,13 +600,14 @@ void layoutToolbar(float screenW, float screenH)
 {
 	s_layout.valid = false;
 	s_layout.buttons.clear();
+	s_layout.column.clear();
 
 	const float rowH = screenH * 0.07f * s_settings.scale;
 	// Stay clear of the rounded screen corners: the safe area covers the camera housing on
 	// phones, and the extra margin keeps the corner tab off the curve on every device.
 	const Insets insets = safeAreaInsets(screenW, screenH);
 	const float margin = screenH * 0.02f;
-	const float gap = SDL_max(4.0f, rowH * 0.08f);
+	const float gap = SDL_max(4.0f, rowH * 0.12f);
 	Int pointSize = (Int)(rowH * 0.30f);
 
 	Int count = 0;
@@ -608,12 +623,12 @@ void layoutToolbar(float screenW, float screenH)
 		for (Int i = 0; i < count; ++i) {
 			Int textW = 0, textH = 0;
 			labelSize(buttonLabel(buttons[i]), textW, textH);
-			const float minW = rowH * shrink * (buttons[i].action == ACTION_GROUP ? 0.8f : 1.1f);
-			widths[(size_t)i] = SDL_max(minW, (float)textW + rowH * shrink * 0.4f);
+			// Pills: room for the rounded ends on both sides of the label.
+			widths[(size_t)i] = SDL_max(rowH * shrink * 1.4f, (float)textW + rowH * shrink * 0.9f);
 			total += widths[(size_t)i];
 		}
 		total += gap * (float)(count - 1);
-		if (total <= screenW - insets.left - insets.right - 2.0f * margin - rowH * 2.4f) {
+		if (total <= screenW - insets.left - insets.right - 2.0f * margin - rowH * 2.6f) {
 			break;
 		}
 		shrink *= 0.88f;
@@ -626,13 +641,13 @@ void layoutToolbar(float screenW, float screenH)
 	labelSize("Hotkeys", hotkeysW, hotkeysH);
 	labelSize("Hide", hideW, hideH);
 	const float tabTextW = (float)SDL_max(hotkeysW, hideW);
-	s_layout.tab.w = SDL_max(rowH * 1.6f, tabTextW + rowH * 0.6f);
+	s_layout.tab.w = SDL_max(rowH * 1.8f, tabTextW + rowH * 0.9f);
 	s_layout.tab.h = rowH;
 	s_layout.tab.x = screenW - insets.right - s_layout.tab.w - margin;
 	s_layout.tab.y = insets.top + margin;
 
-	// The button row sits to the left of the tab, right-aligned against it.
 	if (s_settings.toolbarOpen) {
+		// The button row sits to the left of the tab, right-aligned against it.
 		float x = s_layout.tab.x - gap - total;
 		for (Int i = 0; i < count; ++i) {
 			Rect rect;
@@ -643,8 +658,77 @@ void layoutToolbar(float screenW, float screenH)
 			s_layout.buttons.push_back(rect);
 			x += widths[(size_t)i] + gap;
 		}
+
+		// The round buttons run down the right side under the tab, right edges aligned.
+		const float diameter = screenH * 0.085f * s_settings.scale;
+		const float columnGap = diameter * 0.2f;
+		float y = s_layout.tab.y + s_layout.tab.h + columnGap * 1.5f;
+		for (Int i = 0; i < COLUMN_BUTTON_COUNT; ++i) {
+			Rect rect;
+			rect.w = diameter;
+			rect.h = diameter;
+			rect.x = s_layout.tab.x + s_layout.tab.w - diameter;
+			rect.y = y;
+			s_layout.column.push_back(rect);
+			y += diameter + columnGap;
+		}
 	}
 	s_layout.valid = true;
+}
+
+// ---------------------------------------------------------------------------
+// Rounded shapes. Filled with horizontal spans (batched by the caller), outlined with short line
+// segments, which is enough for clean circles and pills at phone and tablet resolutions.
+// ---------------------------------------------------------------------------
+void fillRoundedRect(const Rect &rect, float radius, Color color)
+{
+	radius = SDL_min(radius, SDL_min(rect.w, rect.h) * 0.5f);
+	const Int STEP = 2;
+	for (Int dy = 0; dy < (Int)rect.h; dy += STEP) {
+		const float rowCenter = (float)dy + (float)STEP * 0.5f;
+		float inset = 0.0f;
+		float fromEdge = -1.0f;
+		if (rowCenter < radius) {
+			fromEdge = radius - rowCenter;
+		} else if (rowCenter > rect.h - radius) {
+			fromEdge = rowCenter - (rect.h - radius);
+		}
+		if (fromEdge >= 0.0f) {
+			inset = radius - SDL_sqrtf(SDL_max(0.0f, radius * radius - fromEdge * fromEdge));
+		}
+		const Int height = SDL_min(STEP, (Int)rect.h - dy);
+		TheDisplay->drawFillRect((Int)(rect.x + inset), (Int)rect.y + dy, (Int)(rect.w - 2.0f * inset), height, color);
+	}
+}
+
+void strokeRoundedRect(const Rect &rect, float radius, Color color, float lineWidth)
+{
+	radius = SDL_min(radius, SDL_min(rect.w, rect.h) * 0.5f);
+	const Int ARC_SEGMENTS = 10;
+	// Corner centers, clockwise from top-left, with the angle each arc starts at.
+	const float cx[4] = { rect.x + radius, rect.x + rect.w - radius, rect.x + rect.w - radius, rect.x + radius };
+	const float cy[4] = { rect.y + radius, rect.y + radius, rect.y + rect.h - radius, rect.y + rect.h - radius };
+	const float start[4] = { SDL_PI_F, SDL_PI_F * 1.5f, 0.0f, SDL_PI_F * 0.5f };
+	float prevX = 0.0f, prevY = 0.0f;
+	bool havePrev = false;
+	float firstX = 0.0f, firstY = 0.0f;
+	for (Int corner = 0; corner < 4; ++corner) {
+		for (Int s = 0; s <= ARC_SEGMENTS; ++s) {
+			const float angle = start[corner] + (float)s / (float)ARC_SEGMENTS * SDL_PI_F * 0.5f;
+			const float px = cx[corner] + SDL_cosf(angle) * radius;
+			const float py = cy[corner] + SDL_sinf(angle) * radius;
+			if (havePrev) {
+				TheDisplay->drawLine((Int)prevX, (Int)prevY, (Int)px, (Int)py, lineWidth, color);
+			} else {
+				firstX = px;
+				firstY = py;
+			}
+			prevX = px;
+			prevY = py;
+			havePrev = true;
+		}
+	}
+	TheDisplay->drawLine((Int)prevX, (Int)prevY, (Int)firstX, (Int)firstY, lineWidth, color);
 }
 
 // ---------------------------------------------------------------------------
@@ -683,24 +767,38 @@ void clampKeyboardButton()
 	s_settings.keyboardY = SDL_clamp(s_settings.keyboardY, minY, SDL_max(minY, maxY));
 }
 
-// Where the button is actually shown. While the keyboard is open it must not sit underneath it, or
-// it could not be tapped to close the keyboard again. The keyboard's height is not known here, so
-// keep the button in the top part of the screen; when an entry field is being typed into, SDL
-// slides the view so the field stays above the keyboard, and just above the field is visible too.
-// The saved position is untouched and applies again once the keyboard closes.
+// Where the button is actually shown. The saved position is untouched and applies again once
+// whatever moved the button is gone.
+// - While the keyboard is open it must not sit underneath it, or it could not be tapped to close
+//   the keyboard again. The keyboard's height is not known here, so keep the button in the top
+//   part of the screen; when an entry field is being typed into, SDL slides the view so the field
+//   stays above the keyboard, and just above the field is visible too.
+// - While the toolbar is open it must not cover the round buttons on the right: it moves left of
+//   the column.
 void keyboardButtonCenter(float &x, float &y)
 {
 	x = s_settings.keyboardX;
 	y = s_settings.keyboardY;
 	float halfW = 0.0f, halfH = 0.0f;
-	if (!s_keyboardOpen || !keyboardButtonHalfExtents(halfW, halfH)) {
+	if (!keyboardButtonHalfExtents(halfW, halfH)) {
 		return;
 	}
-	float limit = 0.30f;
-	if (s_keyboardFieldTop >= 0.0f) {
-		limit = SDL_max(s_keyboardFieldTop - halfH - 0.01f, halfH);
+	if (s_keyboardOpen) {
+		float limit = 0.30f;
+		if (s_keyboardFieldTop >= 0.0f) {
+			limit = SDL_max(s_keyboardFieldTop - halfH - 0.01f, halfH);
+		}
+		y = SDL_min(y, limit);
 	}
-	y = SDL_min(y, limit);
+	float screenW = 0.0f, screenH = 0.0f;
+	if (s_layout.valid && !s_layout.column.empty() && screenSize(screenW, screenH)) {
+		const float columnLeft = s_layout.column.front().x / screenW;
+		const float columnTop = s_layout.column.front().y / screenH;
+		const float columnBottom = (s_layout.column.back().y + s_layout.column.back().h) / screenH;
+		if (x + halfW > columnLeft && y + halfH > columnTop && y - halfH < columnBottom) {
+			x = columnLeft - halfW - 0.01f;
+		}
+	}
 }
 
 bool keyboardButtonHit(float x, float y)
@@ -724,7 +822,8 @@ enum PressTarget { PRESS_NONE, PRESS_KEYBOARD_BUTTON, PRESS_TOOLBAR_TAB, PRESS_T
 
 struct PressState {
 	PressTarget target = PRESS_NONE;
-	Int index = -1;                // toolbar button index
+	Int index = -1;                // toolbar button index (row, or COLUMN_BASE + column)
+	SDL_TouchID touch = 0;
 	SDL_FingerID finger = 0;
 	Uint64 downTicks = 0;
 	float downX = 0.0f, downY = 0.0f;   // normalized
@@ -783,64 +882,99 @@ void drawRings(float screenW, float screenH)
 	}
 }
 
-// Colors for a toolbar button. Pressed and just-activated buttons are drawn opaque and bright,
-// whatever the opacity setting, so a tap is always easy to see.
-void toolbarButtonColors(bool pressed, bool flashing, bool flashLong, Color &back, Color &text, Color &border)
+// Button look, in the style of iOS game controller overlays: dark translucent material with a thin
+// light rim and white label. Pressed and just-activated buttons are drawn opaque and bright,
+// whatever the opacity setting, so a tap is always easy to see. Colors are the iOS system colors.
+struct ButtonStyle {
+	Color back;
+	Color text;
+	Color border;
+	bool strong;   // pressed / flashing / active: thicker rim
+};
+
+ButtonStyle buttonStyle(Int index, const ToolbarButton *button)
 {
-	text = overlayColor(255, 255, 255, 235);
-	border = overlayColor(255, 255, 255, 120);
-	back = overlayColor(20, 20, 20, 120);
+	ButtonStyle style;
+	style.back = overlayColor(28, 28, 30, 150);
+	style.text = overlayColor(255, 255, 255, 240);
+	style.border = overlayColor(255, 255, 255, 110);
+	style.strong = false;
+
+	const bool pressed = (index == TAB_INDEX) ? (s_press.target == PRESS_TOOLBAR_TAB && !s_press.moved)
+	                                          : (s_press.target == PRESS_TOOLBAR_BUTTON && s_press.index == index && !s_press.moved);
+	bool flashLong = false;
+	const bool flashing = isFlashing(index, flashLong);
+
+	if (button != nullptr && (button->action == ACTION_CTRL || button->action == ACTION_SHIFT)) {
+		const ModifierState state = button->action == ACTION_CTRL ? s_ctrl : s_shift;
+		if (state == MODIFIER_ONE_SHOT) {
+			style.back = GameMakeColor(0, 122, 255, 235);   // iOS blue: held for the next tap
+			style.border = GameMakeColor(255, 255, 255, 230);
+			style.strong = true;
+		} else if (state == MODIFIER_LOCKED) {
+			style.back = GameMakeColor(255, 149, 0, 240);   // iOS orange: locked
+			style.border = GameMakeColor(255, 255, 255, 230);
+			style.strong = true;
+		}
+	}
+	if (index == TAB_INDEX && s_settings.toolbarOpen) {
+		style.back = overlayColor(0, 122, 255, 170);
+	}
 	if (pressed) {
-		back = GameMakeColor(255, 255, 255, 235);
-		text = GameMakeColor(0, 0, 0, 255);
-		border = GameMakeColor(255, 255, 255, 255);
+		style.back = GameMakeColor(255, 255, 255, 240);
+		style.text = GameMakeColor(0, 0, 0, 255);
+		style.border = GameMakeColor(255, 255, 255, 255);
+		style.strong = true;
 	}
 	if (flashing) {
-		back = flashLong ? GameMakeColor(60, 200, 80, 240) : GameMakeColor(255, 200, 40, 240);
-		text = GameMakeColor(0, 0, 0, 255);
-		border = GameMakeColor(255, 255, 255, 255);
+		style.back = flashLong ? GameMakeColor(52, 199, 89, 245) : GameMakeColor(255, 204, 0, 245);
+		style.text = GameMakeColor(0, 0, 0, 255);
+		style.border = GameMakeColor(255, 255, 255, 255);
+		style.strong = true;
 	}
+	return style;
 }
 
-void drawToolbar(float screenW, float screenH)
+struct PendingLabel {
+	std::string text;
+	Rect rect;
+	Color color;
+};
+
+void drawShape(const Rect &rect, float radius, const ButtonStyle &style, float thinLine, float thickLine)
+{
+	fillRoundedRect(rect, radius, style.back);
+	strokeRoundedRect(rect, radius, style.border, style.strong ? thickLine : thinLine);
+}
+
+void drawToolbar(float screenW, float screenH, std::vector<PendingLabel> &labels)
 {
 	layoutToolbar(screenW, screenH);
 	if (!s_layout.valid) {
 		return;
 	}
-	const float lineWidth = SDL_max(1.0f, screenH / 600.0f);
+	const float thinLine = SDL_max(1.5f, screenH / 600.0f);
 	const float thickLine = SDL_max(3.0f, screenH / 250.0f);
 
 	Int count = 0;
 	const ToolbarButton *buttons = currentButtons(count);
 	for (size_t i = 0; i < s_layout.buttons.size() && (Int)i < count; ++i) {
-		const ToolbarButton &button = buttons[i];
-		const bool pressed = s_press.target == PRESS_TOOLBAR_BUTTON && s_press.index == (Int)i && !s_press.moved;
-		bool flashLong = false;
-		const bool flashing = isFlashing((Int)i, flashLong);
-		Color back, text, border;
-		toolbarButtonColors(pressed, flashing, flashLong, back, text, border);
-		if (!pressed && !flashing && (button.action == ACTION_CTRL || button.action == ACTION_SHIFT)) {
-			const ModifierState state = button.action == ACTION_CTRL ? s_ctrl : s_shift;
-			if (state == MODIFIER_ONE_SHOT) back = GameMakeColor(40, 110, 220, 230);
-			else if (state == MODIFIER_LOCKED) back = GameMakeColor(230, 130, 20, 235);
-		}
-		fillRect(s_layout.buttons[i], back);
-		outlineRect(s_layout.buttons[i], border, (pressed || flashing) ? thickLine : lineWidth);
-		drawLabelCentered(buttonLabel(button), s_layout.buttons[i], text);
+		const ButtonStyle style = buttonStyle((Int)i, &buttons[i]);
+		const Rect &rect = s_layout.buttons[i];
+		drawShape(rect, rect.h * 0.5f, style, thinLine, thickLine);
+		labels.push_back({ buttonLabel(buttons[i]), rect, style.text });
+	}
+	for (size_t i = 0; i < s_layout.column.size() && (Int)i < COLUMN_BUTTON_COUNT; ++i) {
+		const Int index = COLUMN_BASE + (Int)i;
+		const ButtonStyle style = buttonStyle(index, &COLUMN_BUTTONS[i]);
+		const Rect &rect = s_layout.column[i];
+		drawShape(rect, rect.w * 0.5f, style, thinLine, thickLine);
+		labels.push_back({ buttonLabel(COLUMN_BUTTONS[i]), rect, style.text });
 	}
 
-	const bool tabPressed = s_press.target == PRESS_TOOLBAR_TAB && !s_press.moved;
-	bool tabFlashLong = false;
-	const bool tabFlashing = isFlashing(FLASH_TAB, tabFlashLong);
-	Color back, text, border;
-	toolbarButtonColors(tabPressed, tabFlashing, tabFlashLong, back, text, border);
-	if (!tabPressed && !tabFlashing && s_settings.toolbarOpen) {
-		back = overlayColor(40, 90, 160, 170);   // open: tinted, like the keyboard button
-	}
-	fillRect(s_layout.tab, back);
-	outlineRect(s_layout.tab, border, (tabPressed || tabFlashing) ? thickLine : lineWidth);
-	drawLabelCentered(s_settings.toolbarOpen ? "Hide" : "Hotkeys", s_layout.tab, text);
+	const ButtonStyle tabStyle = buttonStyle(TAB_INDEX, nullptr);
+	drawShape(s_layout.tab, s_layout.tab.h * 0.5f, tabStyle, thinLine, thickLine);
+	labels.push_back({ s_settings.toolbarOpen ? "Hide" : "Hotkeys", s_layout.tab, tabStyle.text });
 }
 
 void drawKeyboardButton(float screenW, float screenH)
@@ -850,36 +984,59 @@ void drawKeyboardButton(float screenW, float screenH)
 	}
 	clampKeyboardButton();
 
-	const Int side = (Int)(screenH * KEYBOARD_BUTTON_SIZE_RATIO * s_settings.scale);
+	const float side = screenH * KEYBOARD_BUTTON_SIZE_RATIO * s_settings.scale;
 	float centerX = 0.0f, centerY = 0.0f;
 	keyboardButtonCenter(centerX, centerY);
-	const Int left = (Int)(centerX * screenW) - side / 2;
-	const Int top = (Int)(centerY * screenH) - side / 2;
+	Rect rect;
+	rect.w = side;
+	rect.h = side;
+	rect.x = centerX * screenW - side * 0.5f;
+	rect.y = centerY * screenH - side * 0.5f;
 
 	const bool pressing = s_press.target == PRESS_KEYBOARD_BUTTON;
 	const bool dragging = pressing && s_press.dragging;
-	const float backAlpha = dragging ? 190.0f : (pressing ? 160.0f : 100.0f);
-	const Color back = s_keyboardOpen ? overlayColor(40, 90, 160, backAlpha) : overlayColor(20, 20, 20, backAlpha);
-	const Color border = overlayColor(255, 255, 255, dragging ? 230.0f : 150.0f);
-	const Color key = overlayColor(255, 255, 255, dragging ? 220.0f : 150.0f);
-
-	TheDisplay->drawFillRect(left, top, side, side, back);
-	const Real borderWidth = (Real)SDL_max(2, side / 40);
-	TheDisplay->drawOpenRect(left, top, side, side, borderWidth, border);
+	ButtonStyle style;
+	style.back = s_keyboardOpen ? overlayColor(0, 122, 255, 190) : overlayColor(28, 28, 30, 150);
+	style.border = overlayColor(255, 255, 255, 110);
+	style.strong = false;
+	Color key = overlayColor(255, 255, 255, 170);
+	if (pressing) {
+		style.back = GameMakeColor(255, 255, 255, 240);
+		style.border = GameMakeColor(255, 255, 255, 255);
+		style.strong = true;
+		key = GameMakeColor(0, 0, 0, 220);
+	}
+	if (dragging) {
+		style.back = GameMakeColor(255, 204, 0, 240);
+	}
+	drawShape(rect, side * 0.25f, style, SDL_max(1.5f, screenH / 600.0f), SDL_max(3.0f, screenH / 250.0f));
 
 	// Keyboard glyph: two rows of four keys and a space bar.
-	const Int pad = side / 5;
-	const Int innerW = side - 2 * pad;
-	const Int gap = SDL_max(2, side / 24);
+	const Int left = (Int)rect.x;
+	const Int top = (Int)rect.y;
+	const Int iside = (Int)side;
+	const Int pad = iside / 5;
+	const Int innerW = iside - 2 * pad;
+	const Int gap = SDL_max(2, iside / 24);
 	const Int keyW = (innerW - 3 * gap) / 4;
-	const Int keyH = (side - 2 * pad - 2 * gap) / 3;
+	const Int keyH = (iside - 2 * pad - 2 * gap) / 3;
 	for (Int row = 0; row < 2; ++row) {
 		for (Int col = 0; col < 4; ++col) {
-			TheDisplay->drawFillRect(left + pad + col * (keyW + gap), top + pad + row * (keyH + gap),
-			                         keyW, keyH, key);
+			TheDisplay->drawFillRect(left + pad + col * (keyW + gap), top + pad + row * (keyH + gap), keyW, keyH, key);
 		}
 	}
 	TheDisplay->drawFillRect(left + pad + keyW + gap, top + pad + 2 * (keyH + gap), 2 * keyW + gap, keyH, key);
+}
+
+void resetPress(const char *reason)
+{
+	if (s_press.target == PRESS_KEYBOARD_BUTTON && s_press.dragging) {
+		saveSettings();
+	}
+	if (reason != nullptr) {
+		fprintf(stderr, "INFO: touch overlay: %s, press released\n", reason);
+	}
+	s_press = PressState();
 }
 
 } // anonymous namespace
@@ -907,6 +1064,7 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 				return false;
 			}
 			PressState press;
+			press.touch = event.tfinger.touchID;
 			press.finger = event.tfinger.fingerID;
 			press.downTicks = SDL_GetTicks();
 			press.downX = x;
@@ -919,6 +1077,17 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 						press.target = PRESS_TOOLBAR_BUTTON;
 						press.index = (Int)i;
 						break;
+					}
+				}
+				for (size_t i = 0; press.target == PRESS_NONE && i < s_layout.column.size(); ++i) {
+					// Circles: hit-test the round shape, a little larger than drawn.
+					const Rect &rect = s_layout.column[i];
+					const float dx = px - (rect.x + rect.w * 0.5f);
+					const float dy = py - (rect.y + rect.h * 0.5f);
+					const float radius = rect.w * 0.5f + margin;
+					if (dx * dx + dy * dy <= radius * radius) {
+						press.target = PRESS_TOOLBAR_BUTTON;
+						press.index = COLUMN_BASE + (Int)i;
 					}
 				}
 				if (press.target == PRESS_NONE && s_layout.tab.contains(px, py, screenH * 0.015f)) {
@@ -961,9 +1130,7 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 			const bool tapped = event.type == SDL_EVENT_FINGER_UP && !s_press.moved;
 			switch (s_press.target) {
 			case PRESS_KEYBOARD_BUTTON:
-				if (s_press.dragging) {
-					saveSettings();
-				} else if (tapped) {
+				if (!s_press.dragging && tapped) {
 					toggleKeyboard = true;
 				}
 				break;
@@ -971,26 +1138,25 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 				if (tapped) {
 					s_settings.toolbarOpen = !s_settings.toolbarOpen;
 					s_settingsPage = false;
-					flashButton(FLASH_TAB, false);
+					flashButton(TAB_INDEX, false);
 					saveSettings();
 				}
 				break;
 			case PRESS_TOOLBAR_BUTTON:
 				if (tapped && !s_press.longPressFired) {
-					Int count = 0;
-					const ToolbarButton *buttons = currentButtons(count);
-					if (s_press.index >= 0 && s_press.index < count) {
+					const ToolbarButton *button = buttonForIndex(s_press.index);
+					if (button != nullptr) {
 						// Ctrl + group assigns the group: flash it like a long-press assignment.
-						const bool assigns = buttons[s_press.index].action == ACTION_GROUP && s_ctrl != MODIFIER_OFF;
+						const bool assigns = button->action == ACTION_GROUP && s_ctrl != MODIFIER_OFF;
 						flashButton(s_press.index, assigns);
-						activateToolbarButton(buttons[s_press.index], false);
+						activateToolbarButton(*button, false);
 					}
 				}
 				break;
 			default:
 				break;
 			}
-			s_press = PressState();
+			resetPress(nullptr);
 			return true;
 		}
 
@@ -1005,6 +1171,12 @@ void update(void)
 	++s_frame;
 	const Uint64 now = SDL_GetTicks();
 
+	// A press whose finger SDL no longer tracks lost its lift event; release it, or it would keep
+	// claiming events of a later touch that happens to get the same id.
+	if (s_press.target != PRESS_NONE && !fingerIsDown(s_press.touch, s_press.finger)) {
+		resetPress("finger no longer on screen");
+	}
+
 	// Long-presses: a stationary finger emits no events, so they are polled here.
 	if (s_press.target == PRESS_KEYBOARD_BUTTON && !s_press.moved && !s_press.dragging &&
 	    now - s_press.downTicks >= KEYBOARD_BUTTON_DRAG_MS) {
@@ -1012,15 +1184,12 @@ void update(void)
 	}
 	if (s_press.target == PRESS_TOOLBAR_BUTTON && !s_press.moved && !s_press.longPressFired &&
 	    now - s_press.downTicks >= TOOLBAR_LONG_PRESS_MS) {
-		Int count = 0;
-		const ToolbarButton *buttons = currentButtons(count);
-		if (s_press.index >= 0 && s_press.index < count) {
-			const ToolbarAction action = buttons[s_press.index].action;
-			if (action == ACTION_GROUP || action == ACTION_CTRL || action == ACTION_SHIFT) {
-				flashButton(s_press.index, true);
-				activateToolbarButton(buttons[s_press.index], true);
-				s_press.longPressFired = true;
-			}
+		const ToolbarButton *button = buttonForIndex(s_press.index);
+		if (button != nullptr &&
+		    (button->action == ACTION_GROUP || button->action == ACTION_CTRL || button->action == ACTION_SHIFT)) {
+			flashButton(s_press.index, true);
+			activateToolbarButton(*button, true);
+			s_press.longPressFired = true;
 		}
 	}
 
@@ -1036,7 +1205,6 @@ void update(void)
 			releaseAllModifiers();
 		}
 		s_layout.valid = false;
-		return;
 	}
 }
 
@@ -1047,13 +1215,30 @@ void draw(void)
 	if (!screenSize(screenW, screenH)) {
 		return;
 	}
+
+	// Shapes are many small rectangles and lines: batch them into one flush, then draw the labels
+	// on top (text is rendered separately, so it must come after the batch is flushed).
+	const bool ownBatch = !TheDisplay->isBatching();
+	if (ownBatch) {
+		TheDisplay->beginBatch();
+	}
 	drawRings(screenW, screenH);
+	std::vector<PendingLabel> labels;
 	if (toolbarAvailable()) {
-		drawToolbar(screenW, screenH);
+		drawToolbar(screenW, screenH, labels);
 	} else {
 		s_layout.valid = false;
 	}
 	drawKeyboardButton(screenW, screenH);
+	if (ownBatch) {
+		TheDisplay->endBatch();
+	} else {
+		TheDisplay->flush();
+	}
+
+	for (size_t i = 0; i < labels.size(); ++i) {
+		drawLabelCentered(labels[i].text, labels[i].rect, labels[i].color);
+	}
 }
 
 void setKeyboardState(bool open, float fieldTop)
@@ -1082,6 +1267,24 @@ void addTapFeedback(float x, float y, bool rightClick)
 	ring.start = SDL_GetTicks();
 	ring.right = rightClick;
 	ring.active = true;
+}
+
+bool fingerIsDown(SDL_TouchID touchID, SDL_FingerID fingerID)
+{
+	int count = 0;
+	SDL_Finger **fingers = SDL_GetTouchFingers(touchID, &count);
+	if (fingers == nullptr) {
+		return false;
+	}
+	bool found = false;
+	for (int i = 0; i < count; ++i) {
+		if (fingers[i] != nullptr && fingers[i]->id == fingerID) {
+			found = true;
+			break;
+		}
+	}
+	SDL_free(fingers);
+	return found;
 }
 
 bool doubleTapRightClickEnabled(void)

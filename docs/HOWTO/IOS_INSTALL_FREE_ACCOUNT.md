@@ -218,7 +218,8 @@ screen.
     type on screen. **Stop**, **Scatter**: order the selected units.
     **Home** / **Alert**: jump to your command center / the latest radar
     event. **Menu**: pause and options.
-  - **1**-**5**: tap to select a group. To save the current selection as a
+  - The round buttons down the right side are **Ctrl** and groups **1**-**5**.
+    Tap a number to select that group. To save the current selection as a
     group, tap **Ctrl** then the number (like Ctrl+1 on PC), or long-press
     the number. The button flashes green when a group is saved.
   - **Ctrl** / **Shift**: tap to hold the key for your next tap on the game

@@ -51,6 +51,11 @@ void onGameGestureEnded(void);
 /// Show a feedback ring where a click was delivered (normalized screen coordinates).
 void addTapFeedback(float x, float y, bool rightClick);
 
+/// True while SDL still tracks the finger as touching the screen. iOS identifies touches by the
+/// address of their UITouch object and reuses those addresses, so a finger whose lift was never
+/// delivered must be detected this way, not by waiting for an event with its id.
+bool fingerIsDown(SDL_TouchID touchID, SDL_FingerID fingerID);
+
 /// Settings read by the gesture translator.
 bool doubleTapRightClickEnabled(void);
 bool edgePanEnabled(void);

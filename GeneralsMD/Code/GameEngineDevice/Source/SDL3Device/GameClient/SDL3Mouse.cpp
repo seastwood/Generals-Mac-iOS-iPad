@@ -842,8 +842,14 @@ void SDL3Mouse::addSDLEvent(SDL_Event *event)
 	// Check if buffer is full
 	UnsignedInt nextFreeIndex = (m_nextFreeIndex + 1) % MAX_SDL3_MOUSE_EVENTS;
 	if (nextFreeIndex == m_nextGetIndex) {
-		// GeneralsX @bugfix BenderAI 18/02/2026 Temporarily disable debug logging (Phase 1.8)
-		// fprintf(stderr, "WARNING: SDL3Mouse::addSDLEvent() buffer full (dropped event)\n");
+		// GeneralsX @bugfix seastwood 29/09/2026 Report dropped input, rate-limited: a full buffer
+		// silently loses clicks, which looks like unresponsive input.
+		static Uint64 s_lastDropReport = 0;
+		const Uint64 now = SDL_GetTicks();
+		if (now - s_lastDropReport >= 5000) {
+			s_lastDropReport = now;
+			fprintf(stderr, "WARNING: SDL3Mouse::addSDLEvent() buffer full, dropping mouse events\n");
+		}
 		return;
 	}
 
