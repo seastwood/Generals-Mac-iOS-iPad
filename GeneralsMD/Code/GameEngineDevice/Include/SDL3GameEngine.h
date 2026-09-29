@@ -108,6 +108,11 @@ protected:
 	Bool			m_IsActive;
 	Bool			m_IsTextInputActive;
 	GameWindow*	m_TextInputFocusWindow;
+	// GeneralsX @feature seastwood 29/09/2026 On-screen keyboard control (iOS). The user can hide the
+	// keyboard (Return / hide key) while an entry field keeps focus, or open it with no field focused
+	// via the floating keyboard button.
+	GameWindow*	m_TextInputDismissedFor; ///< entry field whose keyboard the user hid; stays hidden while it keeps focus
+	Bool			m_TextInputUserOpened;   ///< keyboard opened from the floating button; stays open without an entry field
 
 	// Event processing
 	void pollSDL3Events(void);
@@ -115,6 +120,8 @@ protected:
 	void updateTextInputState(void);
 	// GeneralsX @bugfix felipebraz 01/04/2026 Forward UTF-8 text input as GWM_IME_CHAR messages.
 	void forwardTextInputEvent(const char* utf8Text);
+	// GeneralsX @feature seastwood 29/09/2026 Show or hide the on-screen keyboard from the floating button.
+	void toggleOnScreenKeyboard(void);
 	void handleKeyboardEvent(const SDL_KeyboardEvent& event);
 	void handleMouseMotionEvent(const SDL_MouseMotionEvent& event);
 	void handleMouseButtonEvent(const SDL_MouseButtonEvent& event);

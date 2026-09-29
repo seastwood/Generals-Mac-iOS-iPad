@@ -202,6 +202,17 @@ On the device, open **Settings → General → VPN & Device Management**, tap
 your Apple ID, then tap **Trust**. Now open **Generals ZH** from the home
 screen.
 
+### Touch controls
+
+- **Tap**: left click (select, command, press buttons). **Drag**: selection
+  box. **Long-press**: right click. **Two-finger drag**: move the camera.
+  **Pinch**: zoom.
+- **Keyboard button** (the small translucent keyboard icon): tap it to show or
+  hide the on-screen keyboard at any time. Long-press it, then drag, to move
+  it; the position is remembered.
+- The keyboard also opens by itself when a text field (such as a save name)
+  is selected. Press **Return** to close it.
+
 ---
 
 ## Every 7 days: reinstall

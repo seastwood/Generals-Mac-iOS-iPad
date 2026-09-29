@@ -479,6 +479,10 @@ int main(int argc, char* argv[])
 		// after a device reset (iPad). With the hint SDL creates the window landscape and the
 		// view controller only rotates between the two landscape orientations.
 		SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+		// GeneralsX @feature seastwood 29/09/2026 Return on the on-screen keyboard closes it (the
+		// Return key press still reaches the game). iPhone keyboards have no hide key, so without
+		// this the keyboard could only be closed by moving focus away from the entry field.
+		SDL_SetHint(SDL_HINT_RETURN_KEY_HIDES_IME, "1");
 #endif
 		if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
 			fprintf(stderr, "FATAL: Failed to initialize SDL3: %s\n", SDL_GetError());

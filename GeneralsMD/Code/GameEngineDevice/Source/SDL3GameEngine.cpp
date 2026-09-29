@@ -48,6 +48,9 @@
 #include "StdDevice/Common/StdLocalFileSystem.h"
 #include "StdDevice/Common/StdBIGFileSystem.h"
 #include "Common/GlobalData.h"
+#include "GameClient/Color.h"
+#include "GameClient/Display.h"
+#include "SDL3Device/GameClient/SDL3TouchOverlay.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <cstdio>
@@ -366,7 +369,233 @@ void updateTouchLongPress(SDL3Mouse *mouse, SDL_Window *window)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Floating on-screen keyboard button
+//
+// GeneralsX @feature seastwood 29/09/2026 Touch devices have no way to summon or dismiss the
+// software keyboard on their own: it only followed entry-field focus, so it could cover the
+// screen with no way to close it (e.g. naming a save). A small translucent button toggles it:
+//   tap                    -> show / hide the keyboard
+//   long-press, then drag  -> move the button; the position is saved in Documents
+// Touches that start on the button never reach the gesture translator above.
+// ---------------------------------------------------------------------------
+struct KeyboardButtonState {
+	enum Phase {
+		IDLE,      // not touched
+		PRESSED,   // finger down on the button; becomes a tap on lift
+		CANCELED,  // finger slid off before the long-press: neither tap nor drag
+		DRAGGING   // long-press fired; the button follows the finger
+	};
+
+	Phase phase = IDLE;
+	SDL_FingerID finger = 0;
+	Uint64 downTicks = 0;
+	float centerX = 0.95f, centerY = 0.30f;  // normalized screen position of the button center
+	float grabX = 0.0f, grabY = 0.0f;        // finger offset from the center while dragging
+	float downX = 0.0f, downY = 0.0f;        // normalized finger-down position
+	bool positionLoaded = false;
+	bool keyboardOpen = false;               // mirrors the engine's text input state for drawing
+};
+
+KeyboardButtonState s_kbButton;
+
+const Uint64 KB_BUTTON_DRAG_MS = 400;
+const float KB_BUTTON_SIZE_RATIO = 0.085f;   // button side as a fraction of the screen height
+const float KB_BUTTON_SLOP = 0.02f;          // normalized movement that cancels a tap
+
+bool keyboardButtonPositionPath(char *path, size_t size)
+{
+	const char *home = getenv("HOME");
+	if (home == nullptr) {
+		return false;
+	}
+	snprintf(path, size, "%s/Documents/touch-keyboard-button.txt", home);
+	return true;
+}
+
+void loadKeyboardButtonPosition()
+{
+	s_kbButton.positionLoaded = true;
+	char path[1024];
+	if (!keyboardButtonPositionPath(path, sizeof(path))) {
+		return;
+	}
+	FILE *file = fopen(path, "r");
+	if (file == nullptr) {
+		return;
+	}
+	float x = 0.0f, y = 0.0f;
+	if (fscanf(file, "%f %f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f && y <= 1.0f) {
+		s_kbButton.centerX = x;
+		s_kbButton.centerY = y;
+	}
+	fclose(file);
+}
+
+void saveKeyboardButtonPosition()
+{
+	char path[1024];
+	if (!keyboardButtonPositionPath(path, sizeof(path))) {
+		return;
+	}
+	FILE *file = fopen(path, "w");
+	if (file == nullptr) {
+		fprintf(stderr, "WARNING: could not save keyboard button position to %s\n", path);
+		return;
+	}
+	fprintf(file, "%f %f\n", s_kbButton.centerX, s_kbButton.centerY);
+	fclose(file);
+}
+
+// Half extents of the button in normalized screen coordinates.
+bool keyboardButtonHalfExtents(float &halfW, float &halfH)
+{
+	if (TheDisplay == nullptr || TheDisplay->getWidth() == 0 || TheDisplay->getHeight() == 0) {
+		return false;
+	}
+	const float side = (float)TheDisplay->getHeight() * KB_BUTTON_SIZE_RATIO;
+	halfW = side * 0.5f / (float)TheDisplay->getWidth();
+	halfH = side * 0.5f / (float)TheDisplay->getHeight();
+	return true;
+}
+
+void clampKeyboardButton()
+{
+	float halfW = 0.0f, halfH = 0.0f;
+	if (!keyboardButtonHalfExtents(halfW, halfH)) {
+		return;
+	}
+	s_kbButton.centerX = SDL_clamp(s_kbButton.centerX, halfW, 1.0f - halfW);
+	s_kbButton.centerY = SDL_clamp(s_kbButton.centerY, halfH, 1.0f - halfH);
+}
+
+bool keyboardButtonHit(float x, float y)
+{
+	float halfW = 0.0f, halfH = 0.0f;
+	if (!keyboardButtonHalfExtents(halfW, halfH)) {
+		return false;
+	}
+	// A little extra margin: the button is small and fingers are not.
+	halfW *= 1.2f;
+	halfH *= 1.2f;
+	return SDL_fabsf(x - s_kbButton.centerX) <= halfW && SDL_fabsf(y - s_kbButton.centerY) <= halfH;
+}
+
+// Returns true when the event belongs to the keyboard button (the gesture translator must not see
+// it). Sets toggleKeyboard when a tap on the button should show or hide the keyboard.
+bool handleKeyboardButtonTouch(const SDL_Event &event, bool &toggleKeyboard)
+{
+	toggleKeyboard = false;
+	if (!s_kbButton.positionLoaded) {
+		loadKeyboardButtonPosition();
+	}
+	const float x = event.tfinger.x;
+	const float y = event.tfinger.y;
+
+	switch (event.type) {
+	case SDL_EVENT_FINGER_DOWN:
+		// Only claim a finger that starts on the button while no other gesture is in progress.
+		if (s_kbButton.phase == KeyboardButtonState::IDLE && s_touch.phase == TouchState::IDLE &&
+		    keyboardButtonHit(x, y)) {
+			s_kbButton.phase = KeyboardButtonState::PRESSED;
+			s_kbButton.finger = event.tfinger.fingerID;
+			s_kbButton.downTicks = SDL_GetTicks();
+			s_kbButton.downX = x;
+			s_kbButton.downY = y;
+			s_kbButton.grabX = x - s_kbButton.centerX;
+			s_kbButton.grabY = y - s_kbButton.centerY;
+			return true;
+		}
+		return false;
+
+	case SDL_EVENT_FINGER_MOTION:
+		if (s_kbButton.phase == KeyboardButtonState::IDLE || event.tfinger.fingerID != s_kbButton.finger) {
+			return false;
+		}
+		if (s_kbButton.phase == KeyboardButtonState::DRAGGING) {
+			s_kbButton.centerX = x - s_kbButton.grabX;
+			s_kbButton.centerY = y - s_kbButton.grabY;
+			clampKeyboardButton();
+		} else if (s_kbButton.phase == KeyboardButtonState::PRESSED &&
+		           SDL_fabsf(x - s_kbButton.downX) + SDL_fabsf(y - s_kbButton.downY) > KB_BUTTON_SLOP) {
+			s_kbButton.phase = KeyboardButtonState::CANCELED;
+		}
+		return true;
+
+	case SDL_EVENT_FINGER_UP:
+	case SDL_EVENT_FINGER_CANCELED:
+		if (s_kbButton.phase == KeyboardButtonState::IDLE || event.tfinger.fingerID != s_kbButton.finger) {
+			return false;
+		}
+		if (s_kbButton.phase == KeyboardButtonState::PRESSED && event.type == SDL_EVENT_FINGER_UP) {
+			toggleKeyboard = true;
+		} else if (s_kbButton.phase == KeyboardButtonState::DRAGGING) {
+			saveKeyboardButtonPosition();
+		}
+		s_kbButton.phase = KeyboardButtonState::IDLE;
+		return true;
+
+	default:
+		return false;
+	}
+}
+
+// Called once per frame: a stationary finger emits no events, so the long-press that starts a
+// drag is polled like the gesture translator's long-press.
+void updateKeyboardButtonLongPress()
+{
+	if (s_kbButton.phase == KeyboardButtonState::PRESSED &&
+	    (SDL_GetTicks() - s_kbButton.downTicks) >= KB_BUTTON_DRAG_MS) {
+		s_kbButton.phase = KeyboardButtonState::DRAGGING;
+	}
+}
+
 } // anonymous namespace
+
+void SDL3TouchOverlay_Draw(void)
+{
+	float halfW = 0.0f, halfH = 0.0f;
+	if (!keyboardButtonHalfExtents(halfW, halfH)) {
+		return;
+	}
+	if (!s_kbButton.positionLoaded) {
+		loadKeyboardButtonPosition();
+	}
+	clampKeyboardButton();
+
+	const Int screenW = TheDisplay->getWidth();
+	const Int screenH = TheDisplay->getHeight();
+	const Int side = (Int)((float)screenH * KB_BUTTON_SIZE_RATIO);
+	const Int left = (Int)(s_kbButton.centerX * (float)screenW) - side / 2;
+	const Int top = (Int)(s_kbButton.centerY * (float)screenH) - side / 2;
+
+	const bool dragging = s_kbButton.phase == KeyboardButtonState::DRAGGING;
+	const bool pressed = s_kbButton.phase == KeyboardButtonState::PRESSED;
+	const UnsignedByte backAlpha = dragging ? 190 : (pressed ? 160 : 100);
+	const Color back = s_kbButton.keyboardOpen ? GameMakeColor(40, 90, 160, backAlpha)
+	                                           : GameMakeColor(20, 20, 20, backAlpha);
+	const Color border = GameMakeColor(255, 255, 255, dragging ? 230 : 150);
+	const Color key = GameMakeColor(255, 255, 255, dragging ? 220 : 150);
+
+	TheDisplay->drawFillRect(left, top, side, side, back);
+	const Real borderWidth = (Real)SDL_max(2, side / 40);
+	TheDisplay->drawOpenRect(left, top, side, side, borderWidth, border);
+
+	// Keyboard glyph: two rows of four keys and a space bar.
+	const Int pad = side / 5;
+	const Int innerW = side - 2 * pad;
+	const Int gap = SDL_max(2, side / 24);
+	const Int keyW = (innerW - 3 * gap) / 4;
+	const Int keyH = (side - 2 * pad - 2 * gap) / 3;
+	for (Int row = 0; row < 2; ++row) {
+		for (Int col = 0; col < 4; ++col) {
+			TheDisplay->drawFillRect(left + pad + col * (keyW + gap), top + pad + row * (keyH + gap),
+			                         keyW, keyH, key);
+		}
+	}
+	TheDisplay->drawFillRect(left + pad + keyW + gap, top + pad + 2 * (keyH + gap),
+	                         2 * keyW + gap, keyH, key);
+}
 #endif // TARGET_OS_IPHONE
 
 namespace {
@@ -435,7 +664,9 @@ SDL3GameEngine::SDL3GameEngine()
 	  m_IsInitialized(false),
 	  m_IsActive(false),
 	  m_IsTextInputActive(false),
-	  m_TextInputFocusWindow(nullptr)
+	  m_TextInputFocusWindow(nullptr),
+	  m_TextInputDismissedFor(nullptr),
+	  m_TextInputUserOpened(false)
 {
 	fprintf(stderr, "DEBUG: SDL3GameEngine::SDL3GameEngine() created\n");
 }
@@ -691,6 +922,16 @@ void SDL3GameEngine::pollSDL3Events(void)
 			case SDL_EVENT_FINGER_MOTION:
 			case SDL_EVENT_FINGER_UP:
 			case SDL_EVENT_FINGER_CANCELED:
+				{
+					// The floating keyboard button claims touches that start on it.
+					bool toggleKeyboard = false;
+					if (handleKeyboardButtonTouch(event, toggleKeyboard)) {
+						if (toggleKeyboard) {
+							toggleOnScreenKeyboard();
+						}
+						break;
+					}
+				}
 				if (TheMouse && m_SDLWindow) {
 					SDL3Mouse* mouse = dynamic_cast<SDL3Mouse*>(TheMouse);
 					if (mouse) {
@@ -713,7 +954,8 @@ void SDL3GameEngine::pollSDL3Events(void)
 	}
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-	// Poll the long-press timer every frame; a stationary finger emits no events.
+	// Poll the long-press timers every frame; a stationary finger emits no events.
+	updateKeyboardButtonLongPress();
 	if (TheMouse && m_SDLWindow) {
 		SDL3Mouse* touchMouse = dynamic_cast<SDL3Mouse*>(TheMouse);
 		if (touchMouse) {
@@ -734,20 +976,84 @@ void SDL3GameEngine::updateTextInputState(void)
 	const Bool wantsTextInput =
 		focusedWindow != nullptr && BitIsSet(focusedWindow->winGetStyle(), GWS_ENTRY_FIELD);
 
-	if (wantsTextInput) {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @feature seastwood 29/09/2026 Let the user close the on-screen keyboard. SDL stops
+	// text input itself when the keyboard is hidden (Return with SDL_HINT_RETURN_KEY_HIDES_IME, or
+	// the iPad hide key). Respect that instead of reopening it every frame: keep it closed until
+	// focus moves to another window or the floating keyboard button reopens it.
+	if (m_IsTextInputActive && !SDL_TextInputActive(m_SDLWindow)) {
+		m_IsTextInputActive = false;
+		m_TextInputUserOpened = false;
+		m_TextInputDismissedFor = focusedWindow;
+	}
+	if (m_TextInputDismissedFor != nullptr && m_TextInputDismissedFor != focusedWindow) {
+		m_TextInputDismissedFor = nullptr;
+	}
+	const Bool keepTextInput =
+		(wantsTextInput && focusedWindow != m_TextInputDismissedFor) || m_TextInputUserOpened;
+#else
+	const Bool keepTextInput = wantsTextInput;
+#endif
+
+	if (keepTextInput) {
 		if (!m_IsTextInputActive) {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// Tell SDL where the entry field is so it can slide the view up and keep the field
+			// visible above the keyboard. The rect is in window points; the game draws in pixels.
+			if (wantsTextInput && TheDisplay != nullptr && TheDisplay->getWidth() > 0 && TheDisplay->getHeight() > 0) {
+				int winW = 0, winH = 0;
+				SDL_GetWindowSize(m_SDLWindow, &winW, &winH);
+				Int fieldX = 0, fieldY = 0, fieldW = 0, fieldH = 0;
+				focusedWindow->winGetScreenPosition(&fieldX, &fieldY);
+				focusedWindow->winGetSize(&fieldW, &fieldH);
+				const float scaleX = (float)winW / (float)TheDisplay->getWidth();
+				const float scaleY = (float)winH / (float)TheDisplay->getHeight();
+				SDL_Rect area;
+				area.x = (int)((float)fieldX * scaleX);
+				area.y = (int)((float)fieldY * scaleY);
+				area.w = (int)((float)fieldW * scaleX);
+				area.h = (int)((float)fieldH * scaleY);
+				SDL_SetTextInputArea(m_SDLWindow, &area, 0);
+			} else {
+				SDL_SetTextInputArea(m_SDLWindow, nullptr, 0);
+			}
+#endif
 			if (SDL_StartTextInput(m_SDLWindow)) {
 				m_IsTextInputActive = true;
 			}
 		}
-		m_TextInputFocusWindow = focusedWindow;
 	} else {
 		if (m_IsTextInputActive) {
 			SDL_StopTextInput(m_SDLWindow);
 			m_IsTextInputActive = false;
 		}
-		m_TextInputFocusWindow = nullptr;
 	}
+	m_TextInputFocusWindow = wantsTextInput ? focusedWindow : nullptr;
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	s_kbButton.keyboardOpen = m_IsTextInputActive;
+#endif
+}
+
+// GeneralsX @feature seastwood 29/09/2026 Floating keyboard button: show or hide the on-screen
+// keyboard regardless of which window has focus. With no entry field focused, typed keys still
+// reach the game as key presses (hotkeys, chat).
+void SDL3GameEngine::toggleOnScreenKeyboard(void)
+{
+	if (!m_SDLWindow) {
+		return;
+	}
+
+	if (m_IsTextInputActive) {
+		SDL_StopTextInput(m_SDLWindow);
+		m_IsTextInputActive = false;
+		m_TextInputUserOpened = false;
+		m_TextInputDismissedFor = TheWindowManager ? TheWindowManager->winGetFocus() : nullptr;
+	} else {
+		m_TextInputDismissedFor = nullptr;
+		m_TextInputUserOpened = true;
+	}
+	updateTextInputState();
 }
 
 // GeneralsX @bugfix felipebraz 01/04/2026 Forward SDL UTF-8 text input through existing GWM_IME_CHAR path.

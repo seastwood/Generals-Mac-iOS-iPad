@@ -43,6 +43,9 @@ static void drawFramerateBar();
 #else
 #include <unistd.h> // access() for file existence checks
 #include <SDL3/SDL.h> // For SDL_ShowWindow() on Linux
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#include "SDL3Device/GameClient/SDL3TouchOverlay.h"
+#endif
 #endif
 #include <time.h>
 #include <vector>
@@ -2236,6 +2239,12 @@ AGAIN:
 #ifdef PERF_TIMERS
 				TheGraphDraw->render();
 				TheGraphDraw->clear();
+#endif
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+				// GeneralsX @feature seastwood 29/09/2026 Touch overlay controls (floating keyboard
+				// button) go on top of everything else.
+				SDL3TouchOverlay_Draw();
 #endif
 
 #ifdef PROFILER_ENABLED
