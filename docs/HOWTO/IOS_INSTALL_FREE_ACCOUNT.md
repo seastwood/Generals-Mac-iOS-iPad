@@ -206,7 +206,26 @@ screen.
 
 - **Tap**: left click (select, command, press buttons). **Drag**: selection
   box. **Long-press**: right click. **Two-finger drag**: move the camera.
-  **Pinch**: zoom.
+  **Pinch**: zoom. A short ring shows where each click landed (white: left,
+  orange: right).
+- **Edge scrolling**: rest a finger at the edge of the screen (not on the
+  control bar or other buttons) to scroll the camera that way.
+- **Hotkey toolbar** (in a game): tap the **Hotkeys** tab at the top of the
+  screen to open it; it closes itself after a few seconds of no use, or tap
+  **Hide**.
+  - **All** / **Same**: select all combat units / all units of the selected
+    type on screen. **Stop**, **Scatter**: order the selected units.
+    **Home** / **Alert**: jump to your command center / the latest radar
+    event. **Menu**: pause and options.
+  - **1**-**5**: tap to select a group; long-press to save the current
+    selection as that group (the button flashes green).
+  - **Ctrl** / **Shift**: tap to hold the key for your next tap on the game
+    (blue), long-press to lock it until you tap it again (orange). Ctrl+tap is
+    force-attack, Shift+tap adds to a selection or queues waypoints.
+  - **Opts**: button size, transparency (**Fade**), the keyboard button on or
+    off, **2-Tap** (a quick second tap is a right click; off by default
+    because the first tap is still a left click), edge scrolling, and the
+    tap rings. Settings are saved in `Documents/touch-overlay.ini`.
 - **Keyboard button** (the small translucent keyboard icon): tap it to show or
   hide the on-screen keyboard at any time. Long-press it, then drag, to move
   it; the position is remembered. While the keyboard is open the button moves

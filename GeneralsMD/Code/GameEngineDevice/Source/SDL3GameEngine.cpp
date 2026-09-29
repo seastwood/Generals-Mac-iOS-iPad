@@ -47,9 +47,12 @@
 #include "W3DDevice/GameClient/W3DWebBrowser.h"
 #include "StdDevice/Common/StdLocalFileSystem.h"
 #include "StdDevice/Common/StdBIGFileSystem.h"
+#include "Common/FramePacer.h"
 #include "Common/GlobalData.h"
-#include "GameClient/Color.h"
 #include "GameClient/Display.h"
+#include "GameClient/InGameUI.h"
+#include "GameClient/View.h"
+#include "GameLogic/GameLogic.h"
 #include "SDL3Device/GameClient/SDL3TouchOverlay.h"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -144,7 +147,8 @@ struct TouchState {
 		PENDING,     // finger1 down, gesture identity not yet known, nothing sent
 		DRAGGING,    // finger1 drag in progress, LMB held
 		LONGPRESSED, // long-press fired (RMB click sent), swallow until lift
-		PAN          // two-finger camera pan, RMB held
+		PAN,         // two-finger camera pan, RMB held
+		EDGE_PAN     // finger held at a screen edge: the camera scrolls, no click on lift
 	};
 
 	Phase phase = IDLE;
@@ -156,6 +160,8 @@ struct TouchState {
 	float pinchDist = 0.0f;             // finger distance at last wheel step
 	Uint64 downTicks = 0;
 	float f1x = 0.0f, f1y = 0.0f, f2x = 0.0f, f2y = 0.0f; // normalized per finger
+	Uint64 lastTapTicks = 0;              // previous clean tap, for double-tap right-click
+	float lastTapX = 0.0f, lastTapY = 0.0f;
 };
 
 TouchState s_touch;
@@ -163,6 +169,13 @@ TouchState s_touch;
 const Uint64 LONG_PRESS_MS = 600;
 const float PINCH_STEP_RATIO = 0.06f;  // 6% distance change per wheel tick
 const float TAP_DEAD_ZONE_PX = 8.0f;   // jitter below this keeps a tap a tap
+// GeneralsX @feature seastwood 29/09/2026 Double-tap right-click and edge scrolling (both
+// switchable from the toolbar's settings page, see SDL3TouchOverlay.cpp).
+const Uint64 DOUBLE_TAP_MS = 300;
+const float DOUBLE_TAP_SLOP_PX = 30.0f;
+const Uint64 EDGE_PAN_DELAY_MS = 200;   // hold this long at an edge before scrolling starts
+const float EDGE_PAN_ZONE = 0.04f;      // normalized width of the edge strips
+const float EDGE_PAN_SPEED = 200.0f;    // matches the game's keyboard scroll amount
 
 void sendSyntheticMouse(SDL3Mouse *mouse, SDL_Window *window, Uint32 type,
                         float x, float y, Uint8 button = 0, float wheelY = 0.0f)
@@ -330,15 +343,35 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 				if (event.type == SDL_EVENT_FINGER_CANCELED) {
 					break;
 				}
-				// Clean tap: deliver the full click at the exact press position.
-				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_touch.downX, s_touch.downY);
-				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
-				                   s_touch.downX, s_touch.downY, SDL_BUTTON_LEFT);
-				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
-				                   s_touch.downX, s_touch.downY, SDL_BUTTON_LEFT);
+				{
+					// Clean tap: deliver the full click at the exact press position. With
+					// double-tap right-click enabled, a second tap close in time and place
+					// is a right click instead (the first one was already a left click).
+					const Uint64 now = SDL_GetTicks();
+					const bool rightClick = TouchOverlay::doubleTapRightClickEnabled() &&
+						s_touch.lastTapTicks != 0 && now - s_touch.lastTapTicks <= DOUBLE_TAP_MS &&
+						SDL_fabsf(s_touch.downX - s_touch.lastTapX) + SDL_fabsf(s_touch.downY - s_touch.lastTapY) <= DOUBLE_TAP_SLOP_PX;
+					const Uint8 button = rightClick ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_touch.downX, s_touch.downY);
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
+					                   s_touch.downX, s_touch.downY, button);
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+					                   s_touch.downX, s_touch.downY, button);
+					s_touch.lastTapTicks = rightClick ? 0 : now;
+					s_touch.lastTapX = s_touch.downX;
+					s_touch.lastTapY = s_touch.downY;
+					if (winW > 0 && winH > 0) {
+						TouchOverlay::addTapFeedback(s_touch.downX / (float)winW, s_touch.downY / (float)winH, rightClick);
+					}
+					TouchOverlay::onGameGestureEnded();
+				}
 				break;
 			case TouchState::DRAGGING:
 				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, px, py, SDL_BUTTON_LEFT);
+				TouchOverlay::onGameGestureEnded();
+				break;
+			case TouchState::LONGPRESSED:
+				TouchOverlay::onGameGestureEnded();
 				break;
 			case TouchState::PAN:
 				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
@@ -352,277 +385,83 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 	}
 }
 
+// Direction of the screen edge a normalized point is in; false away from the edges.
+bool edgePanDirection(float x, float y, float &dirX, float &dirY)
+{
+	dirX = x < EDGE_PAN_ZONE ? -1.0f : (x > 1.0f - EDGE_PAN_ZONE ? 1.0f : 0.0f);
+	dirY = y < EDGE_PAN_ZONE ? -1.0f : (y > 1.0f - EDGE_PAN_ZONE ? 1.0f : 0.0f);
+	return dirX != 0.0f || dirY != 0.0f;
+}
+
+// True when a normalized point is over an interactive GUI window (control bar, minimap, buttons),
+// using the same top-level search order as GameWindowManager's input handling. Holding a finger on
+// the control bar at the bottom edge must stay a long-press, not scroll the camera.
+bool pointOverGui(float x, float y)
+{
+	if (TheWindowManager == nullptr || TheDisplay == nullptr) {
+		return false;
+	}
+	ICoord2D pos;
+	pos.x = (Int)(x * (float)TheDisplay->getWidth());
+	pos.y = (Int)(y * (float)TheDisplay->getHeight());
+	GameWindow *toolTipWindow = nullptr;
+	GameWindow *window = TheWindowManager->findWindowUnderMouse(toolTipWindow, &pos, WIN_STATUS_ABOVE, WIN_STATUS_HIDDEN);
+	if (window == nullptr) {
+		window = TheWindowManager->findWindowUnderMouse(toolTipWindow, &pos, WIN_STATUS_NONE,
+			WIN_STATUS_ABOVE | WIN_STATUS_BELOW | WIN_STATUS_HIDDEN);
+	}
+	if (window == nullptr) {
+		window = TheWindowManager->findWindowUnderMouse(toolTipWindow, &pos, WIN_STATUS_BELOW, WIN_STATUS_HIDDEN);
+	}
+	return window != nullptr && (window->winGetStatus() & (WIN_STATUS_SEE_THRU | WIN_STATUS_NO_INPUT)) == 0;
+}
+
+bool edgePanAvailable()
+{
+	return TouchOverlay::edgePanEnabled() && TheGameLogic != nullptr && TheGameLogic->isInGame() &&
+		!TheGameLogic->isInShellGame() && TheTacticalView != nullptr && TheInGameUI != nullptr &&
+		TheInGameUI->getInputEnabled();
+}
+
 // Called once per engine frame (not just per touch event): a perfectly
-// stationary finger produces no SDL events, so the long-press timer must be
-// polled from the frame loop or it would never fire.
+// stationary finger produces no SDL events, so the long-press and edge-pan
+// timers must be polled from the frame loop or they would never fire.
 void updateTouchLongPress(SDL3Mouse *mouse, SDL_Window *window)
 {
-	if (s_touch.phase == TouchState::PENDING &&
-	    (SDL_GetTicks() - s_touch.downTicks) >= LONG_PRESS_MS) {
-		// No LMB was sent yet (deferred), so this is a pure right-click.
-		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_touch.downX, s_touch.downY);
-		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
-		                   s_touch.downX, s_touch.downY, SDL_BUTTON_RIGHT);
-		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
-		                   s_touch.downX, s_touch.downY, SDL_BUTTON_RIGHT);
-		s_touch.phase = TouchState::LONGPRESSED;
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Floating on-screen keyboard button
-//
-// GeneralsX @feature seastwood 29/09/2026 Touch devices have no way to summon or dismiss the
-// software keyboard on their own: it only followed entry-field focus, so it could cover the
-// screen with no way to close it (e.g. naming a save). A small translucent button toggles it:
-//   tap                    -> show / hide the keyboard
-//   long-press, then drag  -> move the button; the position is saved in Documents
-// Touches that start on the button never reach the gesture translator above.
-// ---------------------------------------------------------------------------
-struct KeyboardButtonState {
-	enum Phase {
-		IDLE,      // not touched
-		PRESSED,   // finger down on the button; becomes a tap on lift
-		CANCELED,  // finger slid off before the long-press: neither tap nor drag
-		DRAGGING   // long-press fired; the button follows the finger
-	};
-
-	Phase phase = IDLE;
-	SDL_FingerID finger = 0;
-	Uint64 downTicks = 0;
-	float centerX = 0.95f, centerY = 0.30f;  // normalized screen position of the button center
-	float grabX = 0.0f, grabY = 0.0f;        // finger offset from the center while dragging
-	float downX = 0.0f, downY = 0.0f;        // normalized finger-down position
-	bool positionLoaded = false;
-	bool keyboardOpen = false;               // mirrors the engine's text input state for drawing
-	float fieldTop = -1.0f;                  // normalized top of the entry field being typed into, or -1
-};
-
-KeyboardButtonState s_kbButton;
-
-const Uint64 KB_BUTTON_DRAG_MS = 400;
-const float KB_BUTTON_SIZE_RATIO = 0.085f;   // button side as a fraction of the screen height
-const float KB_BUTTON_SLOP = 0.02f;          // normalized movement that cancels a tap
-
-bool keyboardButtonPositionPath(char *path, size_t size)
-{
-	const char *home = getenv("HOME");
-	if (home == nullptr) {
-		return false;
-	}
-	snprintf(path, size, "%s/Documents/touch-keyboard-button.txt", home);
-	return true;
-}
-
-void loadKeyboardButtonPosition()
-{
-	s_kbButton.positionLoaded = true;
-	char path[1024];
-	if (!keyboardButtonPositionPath(path, sizeof(path))) {
-		return;
-	}
-	FILE *file = fopen(path, "r");
-	if (file == nullptr) {
-		return;
-	}
-	float x = 0.0f, y = 0.0f;
-	if (fscanf(file, "%f %f", &x, &y) == 2 && x >= 0.0f && x <= 1.0f && y >= 0.0f && y <= 1.0f) {
-		s_kbButton.centerX = x;
-		s_kbButton.centerY = y;
-	}
-	fclose(file);
-}
-
-void saveKeyboardButtonPosition()
-{
-	char path[1024];
-	if (!keyboardButtonPositionPath(path, sizeof(path))) {
-		return;
-	}
-	FILE *file = fopen(path, "w");
-	if (file == nullptr) {
-		fprintf(stderr, "WARNING: could not save keyboard button position to %s\n", path);
-		return;
-	}
-	fprintf(file, "%f %f\n", s_kbButton.centerX, s_kbButton.centerY);
-	fclose(file);
-}
-
-// Half extents of the button in normalized screen coordinates.
-bool keyboardButtonHalfExtents(float &halfW, float &halfH)
-{
-	if (TheDisplay == nullptr || TheDisplay->getWidth() == 0 || TheDisplay->getHeight() == 0) {
-		return false;
-	}
-	const float side = (float)TheDisplay->getHeight() * KB_BUTTON_SIZE_RATIO;
-	halfW = side * 0.5f / (float)TheDisplay->getWidth();
-	halfH = side * 0.5f / (float)TheDisplay->getHeight();
-	return true;
-}
-
-void clampKeyboardButton()
-{
-	float halfW = 0.0f, halfH = 0.0f;
-	if (!keyboardButtonHalfExtents(halfW, halfH)) {
-		return;
-	}
-	s_kbButton.centerX = SDL_clamp(s_kbButton.centerX, halfW, 1.0f - halfW);
-	s_kbButton.centerY = SDL_clamp(s_kbButton.centerY, halfH, 1.0f - halfH);
-}
-
-// Where the button is actually shown. While the keyboard is open it must not sit underneath it,
-// or it could not be tapped to close the keyboard again. The keyboard's height is not known here,
-// so keep the button in the top part of the screen; when an entry field is being typed into, SDL
-// slides the view so the field stays above the keyboard, and just above the field is visible too.
-// The saved position is untouched and applies again once the keyboard closes.
-void keyboardButtonCenter(float &x, float &y)
-{
-	x = s_kbButton.centerX;
-	y = s_kbButton.centerY;
-	float halfW = 0.0f, halfH = 0.0f;
-	if (!s_kbButton.keyboardOpen || !keyboardButtonHalfExtents(halfW, halfH)) {
-		return;
-	}
-	float limit = 0.30f;
-	if (s_kbButton.fieldTop >= 0.0f) {
-		limit = SDL_max(s_kbButton.fieldTop - halfH - 0.01f, halfH);
-	}
-	y = SDL_min(y, limit);
-}
-
-bool keyboardButtonHit(float x, float y)
-{
-	float halfW = 0.0f, halfH = 0.0f;
-	if (!keyboardButtonHalfExtents(halfW, halfH)) {
-		return false;
-	}
-	// A little extra margin: the button is small and fingers are not.
-	halfW *= 1.2f;
-	halfH *= 1.2f;
-	float centerX = 0.0f, centerY = 0.0f;
-	keyboardButtonCenter(centerX, centerY);
-	return SDL_fabsf(x - centerX) <= halfW && SDL_fabsf(y - centerY) <= halfH;
-}
-
-// Returns true when the event belongs to the keyboard button (the gesture translator must not see
-// it). Sets toggleKeyboard when a tap on the button should show or hide the keyboard.
-bool handleKeyboardButtonTouch(const SDL_Event &event, bool &toggleKeyboard)
-{
-	toggleKeyboard = false;
-	if (!s_kbButton.positionLoaded) {
-		loadKeyboardButtonPosition();
-	}
-	const float x = event.tfinger.x;
-	const float y = event.tfinger.y;
-
-	switch (event.type) {
-	case SDL_EVENT_FINGER_DOWN:
-		// Only claim a finger that starts on the button while no other gesture is in progress.
-		if (s_kbButton.phase == KeyboardButtonState::IDLE && s_touch.phase == TouchState::IDLE &&
-		    keyboardButtonHit(x, y)) {
-			s_kbButton.phase = KeyboardButtonState::PRESSED;
-			s_kbButton.finger = event.tfinger.fingerID;
-			s_kbButton.downTicks = SDL_GetTicks();
-			s_kbButton.downX = x;
-			s_kbButton.downY = y;
-			float centerX = 0.0f, centerY = 0.0f;
-			keyboardButtonCenter(centerX, centerY);
-			s_kbButton.grabX = x - centerX;
-			s_kbButton.grabY = y - centerY;
-			return true;
+	if (s_touch.phase == TouchState::PENDING) {
+		const Uint64 held = SDL_GetTicks() - s_touch.downTicks;
+		float dirX = 0.0f, dirY = 0.0f;
+		if (held >= EDGE_PAN_DELAY_MS && edgePanAvailable() &&
+		    edgePanDirection(s_touch.f1x, s_touch.f1y, dirX, dirY) && !pointOverGui(s_touch.f1x, s_touch.f1y)) {
+			// GeneralsX @feature seastwood 29/09/2026 A finger resting at a screen edge scrolls the
+			// camera that way, like pushing the mouse against the edge on PC. No click is sent.
+			s_touch.phase = TouchState::EDGE_PAN;
+		} else if (held >= LONG_PRESS_MS) {
+			// No LMB was sent yet (deferred), so this is a pure right-click.
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_touch.downX, s_touch.downY);
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
+			                   s_touch.downX, s_touch.downY, SDL_BUTTON_RIGHT);
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+			                   s_touch.downX, s_touch.downY, SDL_BUTTON_RIGHT);
+			s_touch.phase = TouchState::LONGPRESSED;
+			TouchOverlay::addTapFeedback(s_touch.f1x, s_touch.f1y, true);
 		}
-		return false;
-
-	case SDL_EVENT_FINGER_MOTION:
-		if (s_kbButton.phase == KeyboardButtonState::IDLE || event.tfinger.fingerID != s_kbButton.finger) {
-			return false;
-		}
-		if (s_kbButton.phase == KeyboardButtonState::DRAGGING) {
-			s_kbButton.centerX = x - s_kbButton.grabX;
-			s_kbButton.centerY = y - s_kbButton.grabY;
-			clampKeyboardButton();
-		} else if (s_kbButton.phase == KeyboardButtonState::PRESSED &&
-		           SDL_fabsf(x - s_kbButton.downX) + SDL_fabsf(y - s_kbButton.downY) > KB_BUTTON_SLOP) {
-			s_kbButton.phase = KeyboardButtonState::CANCELED;
-		}
-		return true;
-
-	case SDL_EVENT_FINGER_UP:
-	case SDL_EVENT_FINGER_CANCELED:
-		if (s_kbButton.phase == KeyboardButtonState::IDLE || event.tfinger.fingerID != s_kbButton.finger) {
-			return false;
-		}
-		if (s_kbButton.phase == KeyboardButtonState::PRESSED && event.type == SDL_EVENT_FINGER_UP) {
-			toggleKeyboard = true;
-		} else if (s_kbButton.phase == KeyboardButtonState::DRAGGING) {
-			saveKeyboardButtonPosition();
-		}
-		s_kbButton.phase = KeyboardButtonState::IDLE;
-		return true;
-
-	default:
-		return false;
 	}
-}
 
-// Called once per frame: a stationary finger emits no events, so the long-press that starts a
-// drag is polled like the gesture translator's long-press.
-void updateKeyboardButtonLongPress()
-{
-	if (s_kbButton.phase == KeyboardButtonState::PRESSED &&
-	    (SDL_GetTicks() - s_kbButton.downTicks) >= KB_BUTTON_DRAG_MS) {
-		s_kbButton.phase = KeyboardButtonState::DRAGGING;
+	if (s_touch.phase == TouchState::EDGE_PAN && edgePanAvailable()) {
+		float dirX = 0.0f, dirY = 0.0f;
+		if (edgePanDirection(s_touch.f1x, s_touch.f1y, dirX, dirY)) {
+			const Real fpsRatio = TheFramePacer != nullptr ? TheFramePacer->getBaseOverUpdateFpsRatio() : 1.0f;
+			const Real amount = EDGE_PAN_SPEED * fpsRatio * TheGlobalData->m_keyboardScrollFactor;
+			Coord2D offset;
+			offset.x = dirX * TheGlobalData->m_horizontalScrollSpeedFactor * amount;
+			offset.y = dirY * TheGlobalData->m_verticalScrollSpeedFactor * amount;
+			TheTacticalView->userScrollBy(&offset);
+		}
 	}
 }
 
 } // anonymous namespace
-
-void SDL3TouchOverlay_Draw(void)
-{
-	float halfW = 0.0f, halfH = 0.0f;
-	if (!keyboardButtonHalfExtents(halfW, halfH)) {
-		return;
-	}
-	if (!s_kbButton.positionLoaded) {
-		loadKeyboardButtonPosition();
-	}
-	clampKeyboardButton();
-
-	const Int screenW = TheDisplay->getWidth();
-	const Int screenH = TheDisplay->getHeight();
-	const Int side = (Int)((float)screenH * KB_BUTTON_SIZE_RATIO);
-	float centerX = 0.0f, centerY = 0.0f;
-	keyboardButtonCenter(centerX, centerY);
-	const Int left = (Int)(centerX * (float)screenW) - side / 2;
-	const Int top = (Int)(centerY * (float)screenH) - side / 2;
-
-	const bool dragging = s_kbButton.phase == KeyboardButtonState::DRAGGING;
-	const bool pressed = s_kbButton.phase == KeyboardButtonState::PRESSED;
-	const UnsignedByte backAlpha = dragging ? 190 : (pressed ? 160 : 100);
-	const Color back = s_kbButton.keyboardOpen ? GameMakeColor(40, 90, 160, backAlpha)
-	                                           : GameMakeColor(20, 20, 20, backAlpha);
-	const Color border = GameMakeColor(255, 255, 255, dragging ? 230 : 150);
-	const Color key = GameMakeColor(255, 255, 255, dragging ? 220 : 150);
-
-	TheDisplay->drawFillRect(left, top, side, side, back);
-	const Real borderWidth = (Real)SDL_max(2, side / 40);
-	TheDisplay->drawOpenRect(left, top, side, side, borderWidth, border);
-
-	// Keyboard glyph: two rows of four keys and a space bar.
-	const Int pad = side / 5;
-	const Int innerW = side - 2 * pad;
-	const Int gap = SDL_max(2, side / 24);
-	const Int keyW = (innerW - 3 * gap) / 4;
-	const Int keyH = (side - 2 * pad - 2 * gap) / 3;
-	for (Int row = 0; row < 2; ++row) {
-		for (Int col = 0; col < 4; ++col) {
-			TheDisplay->drawFillRect(left + pad + col * (keyW + gap), top + pad + row * (keyH + gap),
-			                         keyW, keyH, key);
-		}
-	}
-	TheDisplay->drawFillRect(left + pad + keyW + gap, top + pad + 2 * (keyH + gap),
-	                         2 * keyW + gap, keyH, key);
-}
 #endif // TARGET_OS_IPHONE
 
 namespace {
@@ -952,7 +791,7 @@ void SDL3GameEngine::pollSDL3Events(void)
 				{
 					// The floating keyboard button claims touches that start on it.
 					bool toggleKeyboard = false;
-					if (handleKeyboardButtonTouch(event, toggleKeyboard)) {
+					if (TouchOverlay::handleFingerEvent(event, s_touch.phase == TouchState::IDLE, toggleKeyboard)) {
 						if (toggleKeyboard) {
 							toggleOnScreenKeyboard();
 						}
@@ -985,7 +824,7 @@ void SDL3GameEngine::pollSDL3Events(void)
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 	// Poll the long-press timers every frame; a stationary finger emits no events.
-	updateKeyboardButtonLongPress();
+	TouchOverlay::update();
 	if (TheMouse && m_SDLWindow) {
 		SDL3Mouse* touchMouse = dynamic_cast<SDL3Mouse*>(TheMouse);
 		if (touchMouse) {
@@ -1078,13 +917,13 @@ void SDL3GameEngine::updateTextInputState(void)
 	m_TextInputFocusWindow = wantsTextInput ? focusedWindow : nullptr;
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-	s_kbButton.keyboardOpen = m_IsTextInputActive;
-	s_kbButton.fieldTop = -1.0f;
+	float fieldTop = -1.0f;
 	if (m_IsTextInputActive && wantsTextInput && TheDisplay != nullptr && TheDisplay->getHeight() > 0) {
 		Int fieldX = 0, fieldY = 0;
 		focusedWindow->winGetScreenPosition(&fieldX, &fieldY);
-		s_kbButton.fieldTop = (float)fieldY / (float)TheDisplay->getHeight();
+		fieldTop = (float)fieldY / (float)TheDisplay->getHeight();
 	}
+	TouchOverlay::setKeyboardState(m_IsTextInputActive, fieldTop);
 #endif
 }
 

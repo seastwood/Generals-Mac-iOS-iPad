@@ -2242,9 +2242,9 @@ AGAIN:
 #endif
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-				// GeneralsX @feature seastwood 29/09/2026 Touch overlay controls (floating keyboard
-				// button) go on top of everything else.
-				SDL3TouchOverlay_Draw();
+				// GeneralsX @feature seastwood 29/09/2026 Touch overlay controls (keyboard button,
+				// hotkey toolbar, tap feedback) go on top of everything else.
+				TouchOverlay::draw();
 #endif
 
 #ifdef PROFILER_ENABLED

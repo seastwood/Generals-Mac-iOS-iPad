@@ -16,12 +16,43 @@
 **	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-// GeneralsX @feature seastwood 29/09/2026 On-screen overlay controls for touch devices (iOS).
-// The overlay state and touch handling live in SDL3GameEngine.cpp next to the touch gesture
-// translator; W3DDisplay::draw() calls this once per frame, after the UI, so the controls
-// stay on top of the game.
+// GeneralsX @feature seastwood 29/09/2026 On-screen overlay controls for touch devices (iOS):
+// the floating keyboard button, the collapsible hotkey toolbar with its settings page, and tap
+// feedback rings. SDL3GameEngine feeds it touch events before its gesture translator and calls
+// update() once per frame; W3DDisplay::draw() calls draw() after the UI so the controls stay on
+// top. Settings are saved to Documents/touch-overlay.ini. Everything here is only defined on iOS
+// builds.
 
 #pragma once
 
-/// Draw the floating on-screen keyboard button. Only defined on iOS builds.
-void SDL3TouchOverlay_Draw(void);
+#include <SDL3/SDL.h>
+
+namespace TouchOverlay {
+
+/// Offer a finger event to the overlay controls. Returns true when the event belongs to them (the
+/// gesture translator must not see it). gestureIdle tells whether the gesture translator is
+/// tracking no finger; new overlay presses only start then. Sets toggleKeyboard when a tap on the
+/// keyboard button should show or hide the on-screen keyboard.
+bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKeyboard);
+
+/// Per-frame work: long-press timers, toolbar auto-collapse, releasing one-shot modifiers.
+void update(void);
+
+/// Draw the overlay controls on top of the frame.
+void draw(void);
+
+/// Mirror the engine's on-screen keyboard state. fieldTop is the normalized top of the entry field
+/// being typed into, or a negative value when none is.
+void setKeyboardState(bool open, float fieldTop);
+
+/// A tap, drag or long-press on the game has finished: one-shot Ctrl/Shift are released.
+void onGameGestureEnded(void);
+
+/// Show a feedback ring where a click was delivered (normalized screen coordinates).
+void addTapFeedback(float x, float y, bool rightClick);
+
+/// Settings read by the gesture translator.
+bool doubleTapRightClickEnabled(void);
+bool edgePanEnabled(void);
+
+} // namespace TouchOverlay
