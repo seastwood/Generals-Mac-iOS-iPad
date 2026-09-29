@@ -210,9 +210,10 @@ screen.
   orange: right).
 - **Edge scrolling**: rest a finger at the edge of the screen (not on the
   control bar or other buttons) to scroll the camera that way.
-- **Hotkey toolbar** (in a game): tap the **Hotkeys** tab at the top of the
-  screen to open it; it closes itself after a few seconds of no use, or tap
-  **Hide**.
+- **Hotkey toolbar** (in a game): tap the **Hotkeys** button in the top-right
+  corner to open it and **Hide** (same place) to close it. It stays open until
+  you close it, and is remembered next time. A button lights up white while
+  pressed and flashes yellow when it fires (green for a long-press).
   - **All** / **Same**: select all combat units / all units of the selected
     type on screen. **Stop**, **Scatter**: order the selected units.
     **Home** / **Alert**: jump to your command center / the latest radar

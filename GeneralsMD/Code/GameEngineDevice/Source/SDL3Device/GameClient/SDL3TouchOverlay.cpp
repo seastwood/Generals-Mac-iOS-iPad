@@ -23,8 +23,8 @@
 **
 **   Keyboard button   tap: show / hide the on-screen keyboard
 **                     long-press, then drag: move it (the position is saved)
-**   Hotkey toolbar    a tab at the top of the screen, in a game only; tap it to open the toolbar
-**                     buttons send the game's own hotkey commands (no key bindings involved):
+**   Hotkey toolbar    a tab fixed in the top-right corner, in a game only; tap it to open or
+**                     close the toolbar (it stays as left, and is remembered). Buttons send the game's own hotkey commands (no key bindings involved):
 **                     All, Same, Stop, Scatter, Home, Alert, groups 1-5 (tap: select, long-press:
 **                     assign the current selection), Ctrl / Shift (tap: held for the next tap on
 **                     the game, long-press: locked until tapped again), Menu, Opts (settings page)
@@ -76,6 +76,7 @@ struct OverlaySettings {
 	bool doubleTapRightClick = false; // off by default: the first tap is already a left click
 	bool edgePan = true;
 	bool tapFeedback = true;
+	bool toolbarOpen = false;         // stays open until closed, remembered across launches
 };
 
 OverlaySettings s_settings;
@@ -145,6 +146,7 @@ void loadSettings()
 		else if (name == "double_tap_right_click") s_settings.doubleTapRightClick = value != 0.0f;
 		else if (name == "edge_pan") s_settings.edgePan = value != 0.0f;
 		else if (name == "tap_feedback") s_settings.tapFeedback = value != 0.0f;
+		else if (name == "toolbar_open") s_settings.toolbarOpen = value != 0.0f;
 	}
 	fclose(file);
 	clampSettings();
@@ -169,6 +171,7 @@ void saveSettings()
 	fprintf(file, "double_tap_right_click=%d\n", s_settings.doubleTapRightClick ? 1 : 0);
 	fprintf(file, "edge_pan=%d\n", s_settings.edgePan ? 1 : 0);
 	fprintf(file, "tap_feedback=%d\n", s_settings.tapFeedback ? 1 : 0);
+	fprintf(file, "toolbar_open=%d\n", s_settings.toolbarOpen ? 1 : 0);
 	fclose(file);
 }
 
@@ -401,12 +404,41 @@ const ToolbarButton SETTINGS_BUTTONS[] = {
 const Int MAIN_BUTTON_COUNT = (Int)(sizeof(MAIN_BUTTONS) / sizeof(MAIN_BUTTONS[0]));
 const Int SETTINGS_BUTTON_COUNT = (Int)(sizeof(SETTINGS_BUTTONS) / sizeof(SETTINGS_BUTTONS[0]));
 
-const Uint64 TOOLBAR_AUTO_COLLAPSE_MS = 8000;
 const Uint64 TOOLBAR_LONG_PRESS_MS = 500;
 
-bool s_toolbarOpen = false;
 bool s_settingsPage = false;
-Uint64 s_toolbarLastUse = 0;
+
+// Press feedback: a tap is often shorter than a frame, so a button that was just activated keeps
+// a bright highlight for a moment. Long-press actions (group assigned, key locked) flash green.
+const Uint64 FLASH_MS = 250;
+struct ButtonFlash {
+	Int index = -1;             // toolbar button index, or FLASH_TAB
+	bool settingsPage = false;  // page the index belongs to
+	bool longPress = false;
+	Uint64 until = 0;
+};
+const Int FLASH_TAB = -2;
+ButtonFlash s_flash;
+
+void flashButton(Int index, bool longPress)
+{
+	s_flash.index = index;
+	s_flash.settingsPage = s_settingsPage;
+	s_flash.longPress = longPress;
+	s_flash.until = SDL_GetTicks() + FLASH_MS;
+}
+
+bool isFlashing(Int index, bool &longPress)
+{
+	if (s_flash.index != index || SDL_GetTicks() >= s_flash.until) {
+		return false;
+	}
+	if (index != FLASH_TAB && s_flash.settingsPage != s_settingsPage) {
+		return false;
+	}
+	longPress = s_flash.longPress;
+	return true;
+}
 
 struct ToolbarLayout {
 	bool valid = false;
@@ -447,14 +479,8 @@ bool toolbarAvailable()
 	return TheGameLogic != nullptr && TheGameLogic->isInGame() && !TheGameLogic->isInShellGame();
 }
 
-void touchToolbar()
-{
-	s_toolbarLastUse = SDL_GetTicks();
-}
-
 void activateToolbarButton(const ToolbarButton &button, bool longPress)
 {
-	touchToolbar();
 	switch (button.action) {
 	case ACTION_META:
 		if (TheMessageStream != nullptr) {
@@ -552,32 +578,37 @@ void layoutToolbar(float screenW, float screenH)
 			total += widths[(size_t)i];
 		}
 		total += gap * (float)(count - 1);
-		if (total <= screenW * 0.96f) {
+		if (total <= screenW * 0.96f - rowH * 2.4f) {
 			break;
 		}
 		shrink *= 0.88f;
 	}
 
 	const float buttonH = rowH * shrink;
-	if (s_toolbarOpen) {
-		float x = (screenW - total) * 0.5f;
+
+	// The tab never moves: top-right corner, same size open or closed.
+	Int hotkeysW = 0, hotkeysH = 0, hideW = 0, hideH = 0;
+	labelSize("Hotkeys", hotkeysW, hotkeysH);
+	labelSize("Hide", hideW, hideH);
+	const float tabTextW = (float)SDL_max(hotkeysW, hideW);
+	s_layout.tab.w = SDL_max(rowH * 1.6f, tabTextW + rowH * 0.6f);
+	s_layout.tab.h = rowH;
+	s_layout.tab.x = screenW - s_layout.tab.w - margin;
+	s_layout.tab.y = margin;
+
+	// The button row sits to the left of the tab, right-aligned against it.
+	if (s_settings.toolbarOpen) {
+		float x = s_layout.tab.x - gap - total;
 		for (Int i = 0; i < count; ++i) {
 			Rect rect;
 			rect.x = x;
-			rect.y = margin;
+			rect.y = margin + (rowH - buttonH) * 0.5f;
 			rect.w = widths[(size_t)i];
 			rect.h = buttonH;
 			s_layout.buttons.push_back(rect);
 			x += widths[(size_t)i] + gap;
 		}
 	}
-
-	Int tabTextW = 0, tabTextH = 0;
-	labelSize(s_toolbarOpen ? "Hide" : "Hotkeys", tabTextW, tabTextH);
-	s_layout.tab.w = SDL_max(screenW * 0.08f, (float)tabTextW + buttonH * 0.8f);
-	s_layout.tab.h = SDL_max(buttonH * 0.55f, (float)tabTextH + 4.0f);
-	s_layout.tab.x = (screenW - s_layout.tab.w) * 0.5f;
-	s_layout.tab.y = s_toolbarOpen ? margin + buttonH + gap : 0.0f;
 	s_layout.valid = true;
 }
 
@@ -712,6 +743,25 @@ void drawRings(float screenW, float screenH)
 	}
 }
 
+// Colors for a toolbar button. Pressed and just-activated buttons are drawn opaque and bright,
+// whatever the opacity setting, so a tap is always easy to see.
+void toolbarButtonColors(bool pressed, bool flashing, bool flashLong, Color &back, Color &text, Color &border)
+{
+	text = overlayColor(255, 255, 255, 235);
+	border = overlayColor(255, 255, 255, 120);
+	back = overlayColor(20, 20, 20, 120);
+	if (pressed) {
+		back = GameMakeColor(255, 255, 255, 235);
+		text = GameMakeColor(0, 0, 0, 255);
+		border = GameMakeColor(255, 255, 255, 255);
+	}
+	if (flashing) {
+		back = flashLong ? GameMakeColor(60, 200, 80, 240) : GameMakeColor(255, 200, 40, 240);
+		text = GameMakeColor(0, 0, 0, 255);
+		border = GameMakeColor(255, 255, 255, 255);
+	}
+}
+
 void drawToolbar(float screenW, float screenH)
 {
 	layoutToolbar(screenW, screenH);
@@ -719,32 +769,38 @@ void drawToolbar(float screenW, float screenH)
 		return;
 	}
 	const float lineWidth = SDL_max(1.0f, screenH / 600.0f);
-	const Color border = overlayColor(255, 255, 255, 120);
-	const Color text = overlayColor(255, 255, 255, 235);
+	const float thickLine = SDL_max(3.0f, screenH / 250.0f);
 
 	Int count = 0;
 	const ToolbarButton *buttons = currentButtons(count);
 	for (size_t i = 0; i < s_layout.buttons.size() && (Int)i < count; ++i) {
 		const ToolbarButton &button = buttons[i];
 		const bool pressed = s_press.target == PRESS_TOOLBAR_BUTTON && s_press.index == (Int)i && !s_press.moved;
-		Color back = overlayColor(20, 20, 20, pressed ? 190 : 120);
-		if (button.action == ACTION_CTRL || button.action == ACTION_SHIFT) {
+		bool flashLong = false;
+		const bool flashing = isFlashing((Int)i, flashLong);
+		Color back, text, border;
+		toolbarButtonColors(pressed, flashing, flashLong, back, text, border);
+		if (!pressed && !flashing && (button.action == ACTION_CTRL || button.action == ACTION_SHIFT)) {
 			const ModifierState state = button.action == ACTION_CTRL ? s_ctrl : s_shift;
-			if (state == MODIFIER_ONE_SHOT) back = overlayColor(40, 90, 160, 190);
-			else if (state == MODIFIER_LOCKED) back = overlayColor(200, 120, 30, 200);
-		}
-		if (pressed && s_press.longPressFired) {
-			back = overlayColor(60, 150, 70, 210);   // a group was just assigned
+			if (state == MODIFIER_ONE_SHOT) back = GameMakeColor(40, 110, 220, 230);
+			else if (state == MODIFIER_LOCKED) back = GameMakeColor(230, 130, 20, 235);
 		}
 		fillRect(s_layout.buttons[i], back);
-		outlineRect(s_layout.buttons[i], border, lineWidth);
+		outlineRect(s_layout.buttons[i], border, (pressed || flashing) ? thickLine : lineWidth);
 		drawLabelCentered(buttonLabel(button), s_layout.buttons[i], text);
 	}
 
 	const bool tabPressed = s_press.target == PRESS_TOOLBAR_TAB && !s_press.moved;
-	fillRect(s_layout.tab, overlayColor(20, 20, 20, tabPressed ? 190 : 110));
-	outlineRect(s_layout.tab, border, lineWidth);
-	drawLabelCentered(s_toolbarOpen ? "Hide" : "Hotkeys", s_layout.tab, text);
+	bool tabFlashLong = false;
+	const bool tabFlashing = isFlashing(FLASH_TAB, tabFlashLong);
+	Color back, text, border;
+	toolbarButtonColors(tabPressed, tabFlashing, tabFlashLong, back, text, border);
+	if (!tabPressed && !tabFlashing && s_settings.toolbarOpen) {
+		back = overlayColor(40, 90, 160, 170);   // open: tinted, like the keyboard button
+	}
+	fillRect(s_layout.tab, back);
+	outlineRect(s_layout.tab, border, (tabPressed || tabFlashing) ? thickLine : lineWidth);
+	drawLabelCentered(s_settings.toolbarOpen ? "Hide" : "Hotkeys", s_layout.tab, text);
 }
 
 void drawKeyboardButton(float screenW, float screenH)
@@ -828,9 +884,6 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 				if (press.target == PRESS_NONE && s_layout.tab.contains(px, py, screenH * 0.015f)) {
 					press.target = PRESS_TOOLBAR_TAB;
 				}
-				if (press.target != PRESS_NONE) {
-					touchToolbar();
-				}
 			}
 			if (press.target == PRESS_NONE && keyboardButtonHit(x, y)) {
 				float centerX = 0.0f, centerY = 0.0f;
@@ -876,9 +929,10 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 				break;
 			case PRESS_TOOLBAR_TAB:
 				if (tapped) {
-					s_toolbarOpen = !s_toolbarOpen;
+					s_settings.toolbarOpen = !s_settings.toolbarOpen;
 					s_settingsPage = false;
-					touchToolbar();
+					flashButton(FLASH_TAB, false);
+					saveSettings();
 				}
 				break;
 			case PRESS_TOOLBAR_BUTTON:
@@ -886,6 +940,7 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 					Int count = 0;
 					const ToolbarButton *buttons = currentButtons(count);
 					if (s_press.index >= 0 && s_press.index < count) {
+						flashButton(s_press.index, false);
 						activateToolbarButton(buttons[s_press.index], false);
 					}
 				}
@@ -920,6 +975,7 @@ void update(void)
 		if (s_press.index >= 0 && s_press.index < count) {
 			const ToolbarAction action = buttons[s_press.index].action;
 			if (action == ACTION_GROUP || action == ACTION_CTRL || action == ACTION_SHIFT) {
+				flashButton(s_press.index, true);
 				activateToolbarButton(buttons[s_press.index], true);
 				s_press.longPressFired = true;
 			}
@@ -939,12 +995,6 @@ void update(void)
 		}
 		s_layout.valid = false;
 		return;
-	}
-
-	if (s_toolbarOpen && s_press.target == PRESS_NONE && s_ctrl != MODIFIER_LOCKED && s_shift != MODIFIER_LOCKED &&
-	    now - s_toolbarLastUse >= TOOLBAR_AUTO_COLLAPSE_MS) {
-		s_toolbarOpen = false;
-		s_settingsPage = false;
 	}
 }
 
