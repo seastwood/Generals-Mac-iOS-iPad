@@ -218,8 +218,9 @@ screen.
     type on screen. **Stop**, **Scatter**: order the selected units.
     **Home** / **Alert**: jump to your command center / the latest radar
     event. **Menu**: pause and options.
-  - **1**-**5**: tap to select a group; long-press to save the current
-    selection as that group (the button flashes green).
+  - **1**-**5**: tap to select a group. To save the current selection as a
+    group, tap **Ctrl** then the number (like Ctrl+1 on PC), or long-press
+    the number. The button flashes green when a group is saved.
   - **Ctrl** / **Shift**: tap to hold the key for your next tap on the game
     (blue), long-press to lock it until you tap it again (orange). Ctrl+tap is
     force-attack, Shift+tap adds to a selection or queues waypoints.

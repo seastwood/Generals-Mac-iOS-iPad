@@ -62,6 +62,8 @@
 #include <string>
 #include <vector>
 
+extern SDL_Window *TheSDL3Window;   // created in SDL3Main.cpp
+
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -201,6 +203,30 @@ bool screenSize(float &width, float &height)
 	width = (float)TheDisplay->getWidth();
 	height = (float)TheDisplay->getHeight();
 	return true;
+}
+
+// Screen area clear of the rounded corners, camera housing and home indicator, as display-pixel
+// insets. SDL reports the UIKit safe area in window points.
+struct Insets {
+	float left = 0.0f, right = 0.0f, top = 0.0f, bottom = 0.0f;
+};
+
+Insets safeAreaInsets(float screenW, float screenH)
+{
+	Insets insets;
+	SDL_Rect safe;
+	int windowW = 0, windowH = 0;
+	if (TheSDL3Window == nullptr || !SDL_GetWindowSafeArea(TheSDL3Window, &safe) ||
+	    !SDL_GetWindowSize(TheSDL3Window, &windowW, &windowH) || windowW <= 0 || windowH <= 0) {
+		return insets;
+	}
+	const float scaleX = screenW / (float)windowW;
+	const float scaleY = screenH / (float)windowH;
+	insets.left = SDL_max(0.0f, (float)safe.x * scaleX);
+	insets.top = SDL_max(0.0f, (float)safe.y * scaleY);
+	insets.right = SDL_max(0.0f, (float)(windowW - safe.x - safe.w) * scaleX);
+	insets.bottom = SDL_max(0.0f, (float)(windowH - safe.y - safe.h) * scaleY);
+	return insets;
 }
 
 Color overlayColor(UnsignedByte r, UnsignedByte g, UnsignedByte b, float alpha)
@@ -489,8 +515,14 @@ void activateToolbarButton(const ToolbarButton &button, bool longPress)
 		break;
 	case ACTION_GROUP:
 		if (TheMessageStream != nullptr) {
-			const Int base = longPress ? GameMessage::MSG_META_CREATE_TEAM0 : GameMessage::MSG_META_SELECT_TEAM0;
+			// Ctrl + number assigns the group, as on a keyboard; so does a long-press. The toolbar
+			// sends the command directly, so it has to honor the sticky Ctrl itself.
+			const bool assign = longPress || s_ctrl != MODIFIER_OFF;
+			const Int base = assign ? GameMessage::MSG_META_CREATE_TEAM0 : GameMessage::MSG_META_SELECT_TEAM0;
 			TheMessageStream->appendMessage((GameMessage::Type)(base + button.value));
+			if (!longPress && s_ctrl == MODIFIER_ONE_SHOT) {
+				setModifier(s_ctrl, MODIFIER_OFF, SDL_SCANCODE_LCTRL);
+			}
 		}
 		break;
 	case ACTION_CTRL:
@@ -556,7 +588,10 @@ void layoutToolbar(float screenW, float screenH)
 	s_layout.buttons.clear();
 
 	const float rowH = screenH * 0.07f * s_settings.scale;
-	const float margin = screenH * 0.012f;
+	// Stay clear of the rounded screen corners: the safe area covers the camera housing on
+	// phones, and the extra margin keeps the corner tab off the curve on every device.
+	const Insets insets = safeAreaInsets(screenW, screenH);
+	const float margin = screenH * 0.02f;
 	const float gap = SDL_max(4.0f, rowH * 0.08f);
 	Int pointSize = (Int)(rowH * 0.30f);
 
@@ -578,7 +613,7 @@ void layoutToolbar(float screenW, float screenH)
 			total += widths[(size_t)i];
 		}
 		total += gap * (float)(count - 1);
-		if (total <= screenW * 0.96f - rowH * 2.4f) {
+		if (total <= screenW - insets.left - insets.right - 2.0f * margin - rowH * 2.4f) {
 			break;
 		}
 		shrink *= 0.88f;
@@ -593,8 +628,8 @@ void layoutToolbar(float screenW, float screenH)
 	const float tabTextW = (float)SDL_max(hotkeysW, hideW);
 	s_layout.tab.w = SDL_max(rowH * 1.6f, tabTextW + rowH * 0.6f);
 	s_layout.tab.h = rowH;
-	s_layout.tab.x = screenW - s_layout.tab.w - margin;
-	s_layout.tab.y = margin;
+	s_layout.tab.x = screenW - insets.right - s_layout.tab.w - margin;
+	s_layout.tab.y = insets.top + margin;
 
 	// The button row sits to the left of the tab, right-aligned against it.
 	if (s_settings.toolbarOpen) {
@@ -602,7 +637,7 @@ void layoutToolbar(float screenW, float screenH)
 		for (Int i = 0; i < count; ++i) {
 			Rect rect;
 			rect.x = x;
-			rect.y = margin + (rowH - buttonH) * 0.5f;
+			rect.y = s_layout.tab.y + (rowH - buttonH) * 0.5f;
 			rect.w = widths[(size_t)i];
 			rect.h = buttonH;
 			s_layout.buttons.push_back(rect);
@@ -639,8 +674,13 @@ void clampKeyboardButton()
 	if (!keyboardButtonHalfExtents(halfW, halfH)) {
 		return;
 	}
-	s_settings.keyboardX = SDL_clamp(s_settings.keyboardX, halfW, 1.0f - halfW);
-	s_settings.keyboardY = SDL_clamp(s_settings.keyboardY, halfH, 1.0f - halfH);
+	float screenW = 0.0f, screenH = 0.0f;
+	screenSize(screenW, screenH);
+	const Insets insets = safeAreaInsets(screenW, screenH);
+	const float minX = halfW + insets.left / screenW, maxX = 1.0f - halfW - insets.right / screenW;
+	const float minY = halfH + insets.top / screenH, maxY = 1.0f - halfH - insets.bottom / screenH;
+	s_settings.keyboardX = SDL_clamp(s_settings.keyboardX, minX, SDL_max(minX, maxX));
+	s_settings.keyboardY = SDL_clamp(s_settings.keyboardY, minY, SDL_max(minY, maxY));
 }
 
 // Where the button is actually shown. While the keyboard is open it must not sit underneath it, or
@@ -940,7 +980,9 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 					Int count = 0;
 					const ToolbarButton *buttons = currentButtons(count);
 					if (s_press.index >= 0 && s_press.index < count) {
-						flashButton(s_press.index, false);
+						// Ctrl + group assigns the group: flash it like a long-press assignment.
+						const bool assigns = buttons[s_press.index].action == ACTION_GROUP && s_ctrl != MODIFIER_OFF;
+						flashButton(s_press.index, assigns);
 						activateToolbarButton(buttons[s_press.index], false);
 					}
 				}
