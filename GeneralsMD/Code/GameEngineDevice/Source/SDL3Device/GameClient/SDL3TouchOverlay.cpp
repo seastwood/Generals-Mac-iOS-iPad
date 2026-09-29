@@ -31,7 +31,8 @@
 **                     long-press: assign the current selection). Ctrl / Shift: tap = held for the
 **                     next tap on the game, long-press = locked until tapped again.
 **   Settings page     button size, opacity, keyboard button on/off, double-tap right-click,
-**                     edge scrolling, tap feedback rings, cursor (trackpad) mode, D-pad
+**                     edge scrolling, tap feedback rings, cursor (trackpad) mode, D-pad,
+**                     frame-rate limit, render resolution (next launch), haptics, autosave
 **   Cursor            cursor mode draws its own arrow: iOS shows no system cursor on touch
 **   D-pad             optional thumb pad on the left edge, in a game: hold a direction to
 **                     scroll the camera (several fingers at once are fine)
@@ -68,6 +69,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <objc/message.h>
+#include <objc/runtime.h>
 #include <string>
 #include <vector>
 
@@ -90,6 +93,10 @@ struct OverlaySettings {
 	bool toolbarOpen = false;         // stays open until closed, remembered across launches
 	bool cursorMode = false;          // trackpad-style cursor instead of direct touch
 	bool dpadVisible = false;
+	Int fpsLimit = 0;                 // 0: leave the game's own limit alone, else 30 / 60 / 120
+	Int renderScalePercent = 100;     // internal resolution, 100 / 75 / 50; applied at launch
+	bool haptics = true;
+	bool autosave = true;             // save a single-player game when leaving the app
 };
 
 OverlaySettings s_settings;
@@ -114,6 +121,12 @@ void clampSettings()
 	s_settings.keyboardY = SDL_clamp(s_settings.keyboardY, 0.0f, 1.0f);
 	s_settings.scale = SDL_clamp(s_settings.scale, SCALE_MIN, SCALE_MAX);
 	s_settings.opacity = SDL_clamp(s_settings.opacity, OPACITY_MIN, OPACITY_MAX);
+	if (s_settings.fpsLimit != 30 && s_settings.fpsLimit != 60 && s_settings.fpsLimit != 120) {
+		s_settings.fpsLimit = 0;
+	}
+	if (s_settings.renderScalePercent != 75 && s_settings.renderScalePercent != 50) {
+		s_settings.renderScalePercent = 100;
+	}
 }
 
 void loadSettings()
@@ -162,6 +175,10 @@ void loadSettings()
 		else if (name == "toolbar_open") s_settings.toolbarOpen = value != 0.0f;
 		else if (name == "cursor_mode") s_settings.cursorMode = value != 0.0f;
 		else if (name == "dpad") s_settings.dpadVisible = value != 0.0f;
+		else if (name == "fps_limit") s_settings.fpsLimit = (Int)value;
+		else if (name == "render_scale") s_settings.renderScalePercent = (Int)value;
+		else if (name == "haptics") s_settings.haptics = value != 0.0f;
+		else if (name == "autosave") s_settings.autosave = value != 0.0f;
 	}
 	fclose(file);
 	clampSettings();
@@ -189,6 +206,10 @@ void saveSettings()
 	fprintf(file, "toolbar_open=%d\n", s_settings.toolbarOpen ? 1 : 0);
 	fprintf(file, "cursor_mode=%d\n", s_settings.cursorMode ? 1 : 0);
 	fprintf(file, "dpad=%d\n", s_settings.dpadVisible ? 1 : 0);
+	fprintf(file, "fps_limit=%d\n", (int)s_settings.fpsLimit);
+	fprintf(file, "render_scale=%d\n", (int)s_settings.renderScalePercent);
+	fprintf(file, "haptics=%d\n", s_settings.haptics ? 1 : 0);
+	fprintf(file, "autosave=%d\n", s_settings.autosave ? 1 : 0);
 	fclose(file);
 }
 
@@ -197,6 +218,33 @@ void ensureSettings()
 	if (!s_settingsLoaded) {
 		loadSettings();
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Haptics: UIImpactFeedbackGenerator through the Objective-C runtime, so this C++ file needs no
+// Objective-C++ build setup. UIKit is already linked (SDL uses it); runs on the main thread,
+// which is where the engine loop and SDL event handling run on iOS.
+// ---------------------------------------------------------------------------
+void playHaptic(Int style)
+{
+	if (!s_settings.haptics) {
+		return;
+	}
+	static id s_generators[3] = { nullptr, nullptr, nullptr };   // light, medium, heavy
+	style = SDL_clamp(style, 0, 2);
+	if (s_generators[style] == nullptr) {
+		Class generatorClass = objc_getClass("UIImpactFeedbackGenerator");
+		if (generatorClass == nullptr) {
+			return;
+		}
+		id allocated = ((id (*)(Class, SEL))objc_msgSend)(generatorClass, sel_registerName("alloc"));
+		// UIImpactFeedbackStyleLight = 0, Medium = 1, Heavy = 2
+		s_generators[style] = ((id (*)(id, SEL, long))objc_msgSend)(allocated, sel_registerName("initWithStyle:"), (long)style);
+		if (s_generators[style] == nullptr) {
+			return;
+		}
+	}
+	((void (*)(id, SEL))objc_msgSend)(s_generators[style], sel_registerName("impactOccurred"));
 }
 
 // ---------------------------------------------------------------------------
@@ -395,7 +443,11 @@ enum ToolbarAction {
 	ACTION_TOGGLE_EDGE_PAN,
 	ACTION_TOGGLE_TAP_FEEDBACK,
 	ACTION_TOGGLE_CURSOR_MODE,
-	ACTION_TOGGLE_DPAD
+	ACTION_TOGGLE_DPAD,
+	ACTION_CYCLE_FPS,
+	ACTION_CYCLE_RENDER_SCALE,
+	ACTION_TOGGLE_HAPTICS,
+	ACTION_TOGGLE_AUTOSAVE
 };
 
 struct ToolbarButton {
@@ -428,6 +480,10 @@ const ToolbarButton SETTINGS_BUTTONS[] = {
 	{ "Rings",    ACTION_TOGGLE_TAP_FEEDBACK, 0 },
 	{ "Cursor",   ACTION_TOGGLE_CURSOR_MODE, 0 },
 	{ "D-pad",    ACTION_TOGGLE_DPAD, 0 },
+	{ "FPS",      ACTION_CYCLE_FPS, 0 },
+	{ "Res",      ACTION_CYCLE_RENDER_SCALE, 0 },
+	{ "Haptics",  ACTION_TOGGLE_HAPTICS, 0 },
+	{ "Autosave", ACTION_TOGGLE_AUTOSAVE, 0 },
 	{ "Back",     ACTION_CLOSE_SETTINGS, 0 },
 };
 
@@ -514,6 +570,8 @@ struct ToolbarLayout {
 };
 ToolbarLayout s_layout;
 
+Int s_renderScaleAtLaunch = 0;   // render scale the running game was started with
+
 std::string onOff(const char *name, bool on)
 {
 	return std::string(name) + (on ? ": On" : ": Off");
@@ -528,6 +586,18 @@ std::string buttonLabel(const ToolbarButton &button)
 	case ACTION_TOGGLE_TAP_FEEDBACK: return onOff(button.label, s_settings.tapFeedback);
 	case ACTION_TOGGLE_CURSOR_MODE: return onOff(button.label, s_settings.cursorMode);
 	case ACTION_TOGGLE_DPAD: return onOff(button.label, s_settings.dpadVisible);
+	case ACTION_TOGGLE_HAPTICS: return onOff(button.label, s_settings.haptics);
+	case ACTION_TOGGLE_AUTOSAVE: return onOff(button.label, s_settings.autosave);
+	case ACTION_CYCLE_FPS:
+		return s_settings.fpsLimit == 0 ? std::string("FPS: Game") : std::string("FPS: ") + std::to_string(s_settings.fpsLimit);
+	case ACTION_CYCLE_RENDER_SCALE:
+		{
+			std::string label = std::string("Res: ") + std::to_string(s_settings.renderScalePercent) + "%";
+			if (s_renderScaleAtLaunch != 0 && s_renderScaleAtLaunch != s_settings.renderScalePercent) {
+				label += " (restart)";
+			}
+			return label;
+		}
 	default: return std::string(button.label);
 	}
 }
@@ -540,6 +610,8 @@ bool toolbarAvailable()
 
 void activateToolbarButton(const ToolbarButton &button, bool longPress)
 {
+	// Assigning a group or locking a key is a bigger action than a plain button press.
+	const bool bigAction = longPress || (button.action == ACTION_GROUP && s_ctrl != MODIFIER_OFF);
 	switch (button.action) {
 	case ACTION_META:
 		if (TheMessageStream != nullptr) {
@@ -618,7 +690,24 @@ void activateToolbarButton(const ToolbarButton &button, bool longPress)
 		s_settings.dpadVisible = !s_settings.dpadVisible;
 		saveSettings();
 		break;
+	case ACTION_CYCLE_FPS:
+		s_settings.fpsLimit = s_settings.fpsLimit == 0 ? 30 : (s_settings.fpsLimit == 30 ? 60 : (s_settings.fpsLimit == 60 ? 120 : 0));
+		saveSettings();
+		break;
+	case ACTION_CYCLE_RENDER_SCALE:
+		s_settings.renderScalePercent = s_settings.renderScalePercent == 100 ? 75 : (s_settings.renderScalePercent == 75 ? 50 : 100);
+		saveSettings();
+		break;
+	case ACTION_TOGGLE_HAPTICS:
+		s_settings.haptics = !s_settings.haptics;
+		saveSettings();
+		break;
+	case ACTION_TOGGLE_AUTOSAVE:
+		s_settings.autosave = !s_settings.autosave;
+		saveSettings();
+		break;
 	}
+	playHaptic(bigAction ? 1 : 0);
 }
 
 // Lay the toolbar out for the current page. Labels are measured with the real font; when the row
@@ -810,7 +899,7 @@ bool s_cursorHeld = false;                   // hold-drag in progress
 
 void drawCursor(float screenW, float screenH)
 {
-	if (!s_cursorVisible || !s_settings.cursorMode) {
+	if (!s_cursorVisible) {
 		return;
 	}
 	const float size = screenH * 0.045f * s_settings.scale;
@@ -1369,6 +1458,7 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 			case PRESS_KEYBOARD_BUTTON:
 				if (!s_press.dragging && tapped) {
 					toggleKeyboard = true;
+					playHaptic(0);
 				}
 				break;
 			case PRESS_TOOLBAR_TAB:
@@ -1376,6 +1466,7 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 					s_settings.toolbarOpen = !s_settings.toolbarOpen;
 					s_settingsPage = false;
 					flashButton(TAB_INDEX, false);
+					playHaptic(0);
 					saveSettings();
 				}
 				break;
@@ -1415,6 +1506,17 @@ void update(void)
 	}
 
 	updateDpad();
+
+	// Frame-rate limit: the game sets its own limit in several places (settings, game start,
+	// some mission scripts), so a chosen limit is re-applied whenever it differs.
+	if (s_settings.fpsLimit != 0 && TheFramePacer != nullptr) {
+		if (TheFramePacer->getFramesPerSecondLimit() != s_settings.fpsLimit) {
+			TheFramePacer->setFramesPerSecondLimit(s_settings.fpsLimit);
+		}
+		if (!TheFramePacer->isFramesPerSecondLimitEnabled()) {
+			TheFramePacer->enableFramesPerSecondLimit(TRUE);
+		}
+	}
 
 	// Long-presses: a stationary finger emits no events, so they are polled here.
 	if (s_press.target == PRESS_KEYBOARD_BUTTON && !s_press.moved && !s_press.dragging &&
@@ -1481,7 +1583,7 @@ void draw(void)
 	}
 
 	// The cursor goes over everything, labels included.
-	if (s_cursorVisible && s_settings.cursorMode) {
+	if (s_cursorVisible) {
 		if (ownBatch) {
 			TheDisplay->beginBatch();
 		}
@@ -1556,6 +1658,27 @@ bool cursorModeEnabled(void)
 {
 	ensureSettings();
 	return s_settings.cursorMode;
+}
+
+float renderScale(void)
+{
+	ensureSettings();
+	if (s_renderScaleAtLaunch == 0) {
+		s_renderScaleAtLaunch = s_settings.renderScalePercent;
+	}
+	return (float)s_renderScaleAtLaunch / 100.0f;
+}
+
+bool autosaveEnabled(void)
+{
+	ensureSettings();
+	return s_settings.autosave;
+}
+
+void haptic(int strength)
+{
+	ensureSettings();
+	playHaptic(strength);
 }
 
 void setCursorState(bool visible, float x, float y, bool buttonHeld)

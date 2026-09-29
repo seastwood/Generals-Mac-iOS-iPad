@@ -48,7 +48,9 @@
 #include "StdDevice/Common/StdLocalFileSystem.h"
 #include "StdDevice/Common/StdBIGFileSystem.h"
 #include "Common/FramePacer.h"
+#include "Common/GameState.h"
 #include "Common/GlobalData.h"
+#include "Common/MessageStream.h"
 #include "GameClient/Display.h"
 #include "GameClient/InGameUI.h"
 #include "GameClient/View.h"
@@ -100,10 +102,40 @@ static inline bool iosShouldPauseRendering()
 	return s_appBackgrounded.load() || s_appInactive.load();
 }
 
+// GeneralsX @feature seastwood 29/09/2026 Save a single-player game when the app is sent to the
+// background: iOS may terminate a suspended app at any time to reclaim memory, which would lose
+// everything since the last manual save. Written to Autosave.sav, which the Load menu lists like
+// any other save. It runs synchronously in the lifecycle watcher, i.e. inside UIKit's
+// will-resign/enter-background callback, because the app can be suspended before the next frame.
+// The watcher fires from SDL's event pump on the main thread, between engine updates.
+static void iosAutosaveOnBackground()
+{
+	static Uint64 s_lastAutosave = 0;
+	if (!TouchOverlay::autosaveEnabled() || TheGameState == nullptr || TheGameLogic == nullptr) {
+		return;
+	}
+	if (!TheGameLogic->isInGame() || TheGameLogic->isInShellGame() || TheGameLogic->isLoadingMap() ||
+	    TheGameLogic->isInMultiplayerGame() || TheGameLogic->isInReplayGame()) {
+		return;
+	}
+	const Uint64 now = SDL_GetTicks();
+	if (s_lastAutosave != 0 && now - s_lastAutosave < 20000) {
+		return;   // app switcher flicks in quick succession: one save is enough
+	}
+	s_lastAutosave = now;
+	UnicodeString description;
+	description.translate(AsciiString("Autosave"));
+	const SaveCode result = TheGameState->saveGame(AsciiString("Autosave.sav"), description, SAVE_FILE_TYPE_NORMAL);
+	fprintf(stderr, "INFO: autosave on leaving the app: %s (code %d)\n", result == SC_OK ? "saved" : "failed", (int)result);
+}
+
 static bool SDLCALL iosLifecycleWatcher(void *userdata, SDL_Event *event)
 {
 	switch (event->type) {
 		case SDL_EVENT_WILL_ENTER_BACKGROUND:
+			iosAutosaveOnBackground();
+			s_appBackgrounded.store(true);
+			break;
 		case SDL_EVENT_DID_ENTER_BACKGROUND:
 			s_appBackgrounded.store(true);
 			break;
@@ -465,6 +497,7 @@ void updateTouchLongPress(SDL3Mouse *mouse, SDL_Window *window)
 			                   s_touch.downX, s_touch.downY, SDL_BUTTON_RIGHT);
 			s_touch.phase = TouchState::LONGPRESSED;
 			TouchOverlay::addTapFeedback(s_touch.f1x, s_touch.f1y, true);
+			TouchOverlay::haptic(0);   // the right click fired: the finger can lift
 		}
 	}
 
@@ -740,6 +773,8 @@ bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Even
 	return leftClicked;
 }
 
+void scrollAtCursorEdge(int winW, int winH);
+
 // Per frame: lost-lift recovery, hold-to-drag, inertia and edge scrolling.
 void updateCursorMode(SDL3Mouse *mouse, SDL_Window *window)
 {
@@ -798,19 +833,8 @@ void updateCursorMode(SDL3Mouse *mouse, SDL_Window *window)
 	}
 
 	// Cursor resting against a screen edge scrolls the camera that way.
-	if (TouchOverlay::edgePanEnabled() && cameraControlAvailable() && s_cursor.phase != CursorState::TWO) {
-		const float nx = s_cursor.x / (float)winW;
-		const float ny = s_cursor.y / (float)winH;
-		const float dirX = nx <= CURSOR_EDGE ? -1.0f : (nx >= 1.0f - CURSOR_EDGE ? 1.0f : 0.0f);
-		const float dirY = ny <= CURSOR_EDGE ? -1.0f : (ny >= 1.0f - CURSOR_EDGE ? 1.0f : 0.0f);
-		if (dirX != 0.0f || dirY != 0.0f) {
-			const Real fpsRatio = TheFramePacer != nullptr ? TheFramePacer->getBaseOverUpdateFpsRatio() : 1.0f;
-			const Real amount = EDGE_PAN_SPEED * fpsRatio * TheGlobalData->m_keyboardScrollFactor;
-			Coord2D offset;
-			offset.x = dirX * TheGlobalData->m_horizontalScrollSpeedFactor * amount;
-			offset.y = dirY * TheGlobalData->m_verticalScrollSpeedFactor * amount;
-			TheTacticalView->userScrollBy(&offset);
-		}
+	if (s_cursor.phase != CursorState::TWO) {
+		scrollAtCursorEdge(winW, winH);
 	}
 
 	cursorPublish(winW, winH);
@@ -834,6 +858,322 @@ void resetTouchModes(SDL3Mouse *mouse, SDL_Window *window)
 	s_cursor.vy = 0.0f;
 	s_cursor.initialized = false;
 	TouchOverlay::setCursorState(false, 0.0f, 0.0f, false);
+}
+
+// ---------------------------------------------------------------------------
+// Game controller (iOS)
+//
+// GeneralsX @feature seastwood 29/09/2026 MFi / Xbox / PlayStation controllers through SDL's
+// gamepad API. The controller drives the same cursor as cursor mode (it is shown while the
+// controller is in use, in either touch mode):
+//   left stick          cursor            right stick        scroll the camera
+//   A / Cross           left button (hold + move = selection box)
+//   B / Circle          right button
+//   X / Square          select all of the selected type on screen
+//   Y / Triangle        select all combat units (LB + Y: scatter)
+//   LB (held)           Ctrl: force attack, and D-pad assigns groups
+//   RB (held)           Shift: add to selection, waypoints
+//   D-pad up/right/down/left   groups 1-4 (LB + D-pad: assign the selection to the group)
+//   LT / RT             zoom out / in
+//   Menu / Start        pause menu        View / Back        jump to the command center
+//   L3                  jump to the latest radar event       R3   stop
+// ---------------------------------------------------------------------------
+struct GamepadState {
+	SDL_Gamepad *pad = nullptr;
+	SDL_JoystickID id = 0;
+	bool active = false;       // the cursor is shown for the controller
+	bool leftHeld = false;     // A holds the left mouse button
+	bool rightHeld = false;    // B holds the right mouse button
+	bool ctrlHeld = false;     // LB
+	bool shiftHeld = false;    // RB
+	Uint64 lastFrameTicks = 0;
+	Uint64 lastZoomTicks = 0;
+};
+
+GamepadState s_pad;
+
+const float PAD_DEAD_ZONE = 0.15f;
+const float PAD_CURSOR_SPEED = 1.1f;     // screen widths per second at full tilt
+const float PAD_SCROLL_SPEED = 300.0f;   // 1.5x the keyboard scroll amount, like the D-pad overlay
+const float PAD_TRIGGER_THRESHOLD = 0.5f;
+const Uint64 PAD_ZOOM_REPEAT_MS = 90;
+
+float padAxis(SDL_GamepadAxis axis)
+{
+	return SDL_clamp((float)SDL_GetGamepadAxis(s_pad.pad, axis) / 32767.0f, -1.0f, 1.0f);
+}
+
+// Radial dead zone and a squared response: fine control near the center, full speed at the edge.
+bool padStick(SDL_GamepadAxis axisX, SDL_GamepadAxis axisY, float &outX, float &outY)
+{
+	const float x = padAxis(axisX);
+	const float y = padAxis(axisY);
+	const float length = SDL_sqrtf(x * x + y * y);
+	if (length <= PAD_DEAD_ZONE) {
+		outX = outY = 0.0f;
+		return false;
+	}
+	const float strength = SDL_min(1.0f, (length - PAD_DEAD_ZONE) / (1.0f - PAD_DEAD_ZONE));
+	const float curved = strength * strength;
+	outX = x / length * curved;
+	outY = y / length * curved;
+	return true;
+}
+
+void padSendKey(SDL_Scancode scancode, bool down)
+{
+	SDL3Keyboard *keyboard = dynamic_cast<SDL3Keyboard *>(TheKeyboard);
+	if (keyboard == nullptr) {
+		return;
+	}
+	SDL_Event event;
+	SDL_zero(event);
+	event.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+	event.key.scancode = scancode;
+	event.key.key = SDL_GetKeyFromScancode(scancode, SDL_KMOD_NONE, false);
+	event.key.down = down;
+	keyboard->addSDLEvent(&event);
+}
+
+void padMeta(GameMessage::Type type)
+{
+	if (TheMessageStream != nullptr) {
+		TheMessageStream->appendMessage(type);
+	}
+}
+
+void padShowCursor(SDL3Mouse *mouse, SDL_Window *window, int winW, int winH)
+{
+	if (!s_cursor.initialized) {
+		s_cursor.initialized = true;
+		s_cursor.x = (float)winW * 0.5f;
+		s_cursor.y = (float)winH * 0.5f;
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+	}
+	s_pad.active = true;
+}
+
+void padOpen(SDL_JoystickID which)
+{
+	if (s_pad.pad != nullptr) {
+		return;   // one controller at a time
+	}
+	s_pad.pad = SDL_OpenGamepad(which);
+	if (s_pad.pad == nullptr) {
+		fprintf(stderr, "WARNING: could not open game controller: %s\n", SDL_GetError());
+		return;
+	}
+	s_pad.id = which;
+	const char *name = SDL_GetGamepadName(s_pad.pad);
+	fprintf(stderr, "INFO: game controller connected: %s\n", name != nullptr ? name : "(unnamed)");
+}
+
+void padReleaseAll(SDL3Mouse *mouse, SDL_Window *window)
+{
+	if (s_pad.leftHeld && mouse != nullptr) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
+	}
+	if (s_pad.rightHeld && mouse != nullptr) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_cursor.x, s_cursor.y, SDL_BUTTON_RIGHT);
+	}
+	if (s_pad.ctrlHeld) {
+		padSendKey(SDL_SCANCODE_LCTRL, false);
+	}
+	if (s_pad.shiftHeld) {
+		padSendKey(SDL_SCANCODE_LSHIFT, false);
+	}
+	s_pad.leftHeld = s_pad.rightHeld = s_pad.ctrlHeld = s_pad.shiftHeld = false;
+}
+
+void padClose(SDL3Mouse *mouse, SDL_Window *window)
+{
+	padReleaseAll(mouse, window);
+	if (s_pad.pad != nullptr) {
+		SDL_CloseGamepad(s_pad.pad);
+	}
+	s_pad = GamepadState();
+	if (!s_cursorModeActive) {
+		TouchOverlay::setCursorState(false, 0.0f, 0.0f, false);
+	}
+	fprintf(stderr, "INFO: game controller disconnected\n");
+}
+
+void padButton(SDL3Mouse *mouse, SDL_Window *window, Uint8 button, bool down)
+{
+	int winW = 0, winH = 0;
+	SDL_GetWindowSize(window, &winW, &winH);
+	if (winW <= 0 || winH <= 0) {
+		return;
+	}
+	padShowCursor(mouse, window, winW, winH);
+
+	switch (button) {
+	case SDL_GAMEPAD_BUTTON_SOUTH:
+		if (down != s_pad.leftHeld) {
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+			sendSyntheticMouse(mouse, window, down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP,
+			                   s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
+			s_pad.leftHeld = down;
+			if (down) {
+				TouchOverlay::addTapFeedback(s_cursor.x / (float)winW, s_cursor.y / (float)winH, false);
+			} else {
+				TouchOverlay::onGameGestureEnded();
+			}
+		}
+		break;
+	case SDL_GAMEPAD_BUTTON_EAST:
+		if (down != s_pad.rightHeld) {
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+			sendSyntheticMouse(mouse, window, down ? SDL_EVENT_MOUSE_BUTTON_DOWN : SDL_EVENT_MOUSE_BUTTON_UP,
+			                   s_cursor.x, s_cursor.y, SDL_BUTTON_RIGHT);
+			s_pad.rightHeld = down;
+			if (down) {
+				TouchOverlay::addTapFeedback(s_cursor.x / (float)winW, s_cursor.y / (float)winH, true);
+			}
+		}
+		break;
+	case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
+		if (down != s_pad.ctrlHeld) {
+			padSendKey(SDL_SCANCODE_LCTRL, down);
+			s_pad.ctrlHeld = down;
+		}
+		break;
+	case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER:
+		if (down != s_pad.shiftHeld) {
+			padSendKey(SDL_SCANCODE_LSHIFT, down);
+			s_pad.shiftHeld = down;
+		}
+		break;
+	default:
+		if (!down) {
+			break;
+		}
+		switch (button) {
+		case SDL_GAMEPAD_BUTTON_WEST:
+			padMeta(GameMessage::MSG_META_SELECT_MATCHING_UNITS);
+			break;
+		case SDL_GAMEPAD_BUTTON_NORTH:
+			padMeta(s_pad.ctrlHeld ? GameMessage::MSG_META_SCATTER : GameMessage::MSG_META_SELECT_ALL);
+			break;
+		case SDL_GAMEPAD_BUTTON_DPAD_UP:
+		case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
+		case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+		case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
+			{
+				const Int group = button == SDL_GAMEPAD_BUTTON_DPAD_UP ? 1 :
+					(button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ? 2 : (button == SDL_GAMEPAD_BUTTON_DPAD_DOWN ? 3 : 4));
+				if (s_pad.ctrlHeld) {
+					padMeta((GameMessage::Type)(GameMessage::MSG_META_CREATE_TEAM0 + group));
+					SDL_RumbleGamepad(s_pad.pad, 0x6000, 0x6000, 90);   // feel that the group was saved
+				} else {
+					padMeta((GameMessage::Type)(GameMessage::MSG_META_SELECT_TEAM0 + group));
+				}
+			}
+			break;
+		case SDL_GAMEPAD_BUTTON_START:
+			padMeta(GameMessage::MSG_META_OPTIONS);
+			break;
+		case SDL_GAMEPAD_BUTTON_BACK:
+			padMeta(GameMessage::MSG_META_VIEW_COMMAND_CENTER);
+			break;
+		case SDL_GAMEPAD_BUTTON_LEFT_STICK:
+			padMeta(GameMessage::MSG_META_VIEW_LAST_RADAR_EVENT);
+			break;
+		case SDL_GAMEPAD_BUTTON_RIGHT_STICK:
+			padMeta(GameMessage::MSG_META_STOP);
+			break;
+		default:
+			break;
+		}
+		break;
+	}
+	TouchOverlay::setCursorState(true, s_cursor.x / (float)winW, s_cursor.y / (float)winH, s_pad.leftHeld);
+}
+
+// Cursor resting against a screen edge scrolls the camera that way (cursor mode and controller).
+void scrollAtCursorEdge(int winW, int winH)
+{
+	if (!TouchOverlay::edgePanEnabled() || !cameraControlAvailable()) {
+		return;
+	}
+	const float nx = s_cursor.x / (float)winW;
+	const float ny = s_cursor.y / (float)winH;
+	const float dirX = nx <= CURSOR_EDGE ? -1.0f : (nx >= 1.0f - CURSOR_EDGE ? 1.0f : 0.0f);
+	const float dirY = ny <= CURSOR_EDGE ? -1.0f : (ny >= 1.0f - CURSOR_EDGE ? 1.0f : 0.0f);
+	if (dirX == 0.0f && dirY == 0.0f) {
+		return;
+	}
+	const Real fpsRatio = TheFramePacer != nullptr ? TheFramePacer->getBaseOverUpdateFpsRatio() : 1.0f;
+	const Real amount = EDGE_PAN_SPEED * fpsRatio * TheGlobalData->m_keyboardScrollFactor;
+	Coord2D offset;
+	offset.x = dirX * TheGlobalData->m_horizontalScrollSpeedFactor * amount;
+	offset.y = dirY * TheGlobalData->m_verticalScrollSpeedFactor * amount;
+	TheTacticalView->userScrollBy(&offset);
+}
+
+// Per frame: sticks and triggers are read directly (they are continuous, not events).
+void updateGamepad(SDL3Mouse *mouse, SDL_Window *window)
+{
+	if (s_pad.pad == nullptr) {
+		return;
+	}
+	int winW = 0, winH = 0;
+	SDL_GetWindowSize(window, &winW, &winH);
+	if (winW <= 0 || winH <= 0) {
+		return;
+	}
+	const Uint64 now = SDL_GetTicks();
+	const float dt = s_pad.lastFrameTicks != 0 ? SDL_min(0.1f, (float)(now - s_pad.lastFrameTicks) / 1000.0f) : 0.0f;
+	s_pad.lastFrameTicks = now;
+
+	float moveX = 0.0f, moveY = 0.0f;
+	if (padStick(SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, moveX, moveY) && dt > 0.0f) {
+		padShowCursor(mouse, window, winW, winH);
+		const float speed = PAD_CURSOR_SPEED * (float)winW;
+		s_cursor.vx = 0.0f;   // the stick takes over from any cursor-mode glide
+		s_cursor.vy = 0.0f;
+		s_cursor.x += moveX * speed * dt;
+		s_cursor.y += moveY * speed * dt;
+		cursorClamp(winW, winH);
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+	}
+
+	float scrollX = 0.0f, scrollY = 0.0f;
+	if (padStick(SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, scrollX, scrollY) && cameraControlAvailable()) {
+		s_pad.active = true;
+		const Real fpsRatio = TheFramePacer != nullptr ? TheFramePacer->getBaseOverUpdateFpsRatio() : 1.0f;
+		const Real amount = PAD_SCROLL_SPEED * fpsRatio * TheGlobalData->m_keyboardScrollFactor;
+		Coord2D offset;
+		offset.x = scrollX * TheGlobalData->m_horizontalScrollSpeedFactor * amount;
+		offset.y = scrollY * TheGlobalData->m_verticalScrollSpeedFactor * amount;
+		TheTacticalView->userScrollBy(&offset);
+	}
+
+	const float zoomIn = padAxis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+	const float zoomOut = padAxis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+	if ((zoomIn > PAD_TRIGGER_THRESHOLD || zoomOut > PAD_TRIGGER_THRESHOLD) && now - s_pad.lastZoomTicks >= PAD_ZOOM_REPEAT_MS) {
+		s_pad.lastZoomTicks = now;
+		padShowCursor(mouse, window, winW, winH);
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_WHEEL, s_cursor.x, s_cursor.y, 0,
+		                   zoomIn > zoomOut ? 1.0f : -1.0f);
+	}
+
+	if (s_pad.active) {
+		if (!s_cursorModeActive) {
+			// Cursor mode scrolls at the edge itself (updateCursorMode).
+			scrollAtCursorEdge(winW, winH);
+		}
+		TouchOverlay::setCursorState(true, s_cursor.x / (float)winW, s_cursor.y / (float)winH, s_pad.leftHeld);
+	}
+}
+
+// A direct touch takes over from the controller: hide its cursor until the controller is used again.
+void padYieldToTouch()
+{
+	if (s_pad.active && !s_cursorModeActive && !s_pad.leftHeld && !s_pad.rightHeld) {
+		s_pad.active = false;
+		TouchOverlay::setCursorState(false, 0.0f, 0.0f, false);
+	}
 }
 
 bool touchGestureIdle()
@@ -1194,12 +1534,35 @@ void SDL3GameEngine::pollSDL3Events(void)
 					break;
 				}
 				if (event.type == SDL_EVENT_FINGER_DOWN) {
+					padYieldToTouch();
 					updateKeyboardForTouch(event.tfinger.x, event.tfinger.y);
 				}
 				if (TheMouse && m_SDLWindow) {
 					SDL3Mouse* mouse = dynamic_cast<SDL3Mouse*>(TheMouse);
 					if (mouse) {
 						handleTouchEvent(mouse, m_SDLWindow, event);
+					}
+				}
+				break;
+#endif
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			case SDL_EVENT_GAMEPAD_ADDED:
+				padOpen(event.gdevice.which);
+				break;
+
+			case SDL_EVENT_GAMEPAD_REMOVED:
+				if (s_pad.pad != nullptr && event.gdevice.which == s_pad.id) {
+					padClose(TheMouse ? dynamic_cast<SDL3Mouse*>(TheMouse) : nullptr, m_SDLWindow);
+				}
+				break;
+
+			case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+			case SDL_EVENT_GAMEPAD_BUTTON_UP:
+				if (s_pad.pad != nullptr && event.gbutton.which == s_pad.id && TheMouse && m_SDLWindow) {
+					SDL3Mouse* padMouse = dynamic_cast<SDL3Mouse*>(TheMouse);
+					if (padMouse) {
+						padButton(padMouse, m_SDLWindow, event.gbutton.button, event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN);
 					}
 				}
 				break;
@@ -1233,6 +1596,7 @@ void SDL3GameEngine::pollSDL3Events(void)
 			} else {
 				updateTouchLongPress(touchMouse, m_SDLWindow);
 			}
+			updateGamepad(touchMouse, m_SDLWindow);
 		}
 	}
 #endif

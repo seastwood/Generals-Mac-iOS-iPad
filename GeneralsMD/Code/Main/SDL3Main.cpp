@@ -61,6 +61,9 @@
 #include "Common/Debug.h"
 #include "Common/version.h"  // GeneralsX @bugfix BenderAI 14/02/2026 Version class + TheVersion extern
 #include "SDL3GameEngine.h"
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#include "SDL3Device/GameClient/SDL3TouchOverlay.h"
+#endif
 
 // DXVK WSI
 #define DXVK_WSI_SDL3 1
@@ -484,7 +487,14 @@ int main(int argc, char* argv[])
 		// this the keyboard could only be closed by moving focus away from the entry field.
 		SDL_SetHint(SDL_HINT_RETURN_KEY_HIDES_IME, "1");
 #endif
-		if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+		// GeneralsX @feature seastwood 29/09/2026 Game controllers (MFi, Xbox, PlayStation) drive the
+		// cursor and hotkeys on iOS, see SDL3GameEngine.cpp.
+		const SDL_InitFlags sdlInitFlags = SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD;
+#else
+		const SDL_InitFlags sdlInitFlags = SDL_INIT_VIDEO | SDL_INIT_AUDIO;
+#endif
+		if (!SDL_InitSubSystem(sdlInitFlags)) {
 			fprintf(stderr, "FATAL: Failed to initialize SDL3: %s\n", SDL_GetError());
 			return 1;
 		}
@@ -560,8 +570,12 @@ int main(int argc, char* argv[])
 				static char xresVal[16], yresVal[16];
 				static char xresFlag[] = "-xres";
 				static char yresFlag[] = "-yres";
-				const int yres = (winW > winH) ? winH : winW;
-				int xres = (winW > winH) ? winW : winH;
+				// GeneralsX @feature seastwood 29/09/2026 Optional lower render resolution (touch overlay
+				// settings): larger game UI and text, less GPU work and heat. The picture is scaled up
+				// to fill the screen by the pillarbox blit.
+				const float renderScale = TouchOverlay::renderScale();
+				const int yres = (int)((float)((winW > winH) ? winH : winW) * renderScale) & ~1;
+				int xres = (int)((float)((winW > winH) ? winW : winH) * renderScale);
 				xres &= ~1;  // keep it even
 				snprintf(xresVal, sizeof(xresVal), "%d", xres);
 				snprintf(yresVal, sizeof(yresVal), "%d", yres);

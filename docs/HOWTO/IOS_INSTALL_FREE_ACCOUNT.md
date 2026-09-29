@@ -228,8 +228,14 @@ screen.
   - **Opts**: button size, transparency (**Fade**), the keyboard button on or
     off, **2-Tap** (a quick second tap is a right click; off by default
     because the first tap is still a left click), edge scrolling, the tap
-    rings, **Cursor** mode and the **D-pad**. Settings are saved in
-    `Documents/touch-overlay.ini`.
+    rings, **Cursor** mode, the **D-pad**, **FPS** (frame-rate limit: Game /
+    30 / 60 / 120; lower saves battery and heat), **Res** (render resolution
+    100% / 75% / 50%: lower makes the game's own UI and text bigger and runs
+    cooler, applies the next time the game starts), **Haptics** and
+    **Autosave**. Settings are saved in `Documents/touch-overlay.ini`.
+- **Autosave**: when you leave the app during a campaign or skirmish game, it
+  saves to **Autosave** (in the Load menu), because iOS may close a
+  backgrounded game at any time.
 - **Cursor mode** (Opts → **Cursor: On**): the screen works like a laptop
   trackpad with an on-screen arrow instead of tapping things directly.
   - Slide one finger to move the cursor; flick to send it gliding, and touch
@@ -251,6 +257,32 @@ screen.
   is selected. Press **Return** or tap anywhere outside the text field to
   close it; tap the text field to bring it back. Autocorrect and the
   predictive text bar are turned off.
+
+### Game controller
+
+Pair an Xbox, PlayStation or MFi controller in **Settings → Bluetooth**; the
+game picks it up automatically, and a cursor appears when you use it.
+
+| Control | Action |
+|---|---|
+| Left stick | Move the cursor |
+| Right stick | Scroll the map |
+| **A** / Cross | Left click (hold and move: selection box) |
+| **B** / Circle | Right click |
+| **X** / Square | Select all units of the selected type on screen |
+| **Y** / Triangle | Select all combat units (**LB + Y**: scatter) |
+| **LB** (hold) | Ctrl: force attack; with the D-pad, save a group |
+| **RB** (hold) | Shift: add to selection, queue waypoints |
+| D-pad up / right / down / left | Select group 1 / 2 / 3 / 4 (**LB +** D-pad: save the selection as that group; the controller rumbles) |
+| **LT** / **RT** | Zoom out / in |
+| Menu / Start | Pause menu |
+| View / Back | Jump to the command center |
+| L3 (press left stick) | Jump to the latest radar event |
+| R3 (press right stick) | Stop |
+
+Pushing the cursor against a screen edge scrolls the map (the **Edge**
+setting). Touching the screen hides the controller cursor until you use the
+controller again.
 
 ---
 

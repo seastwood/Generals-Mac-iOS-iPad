@@ -61,8 +61,17 @@ bool doubleTapRightClickEnabled(void);
 bool edgePanEnabled(void);
 bool cursorModeEnabled(void);
 
-/// Cursor mode: where to draw the cursor (normalized screen coordinates), and whether the left
-/// button is held by a hold-drag.
+bool autosaveEnabled(void);
+
+/// Internal render resolution as a fraction of the screen (1.0, 0.75 or 0.5). The first call
+/// fixes the value for this run: SDL3Main reads it at launch to choose -xres/-yres.
+float renderScale(void);
+
+/// Short haptic tap if enabled in the settings: 0 light, 1 medium, 2 heavy.
+void haptic(int strength);
+
+/// Where to draw the cursor (normalized screen coordinates, cursor mode or a game controller), and
+/// whether the left button is held.
 void setCursorState(bool visible, float x, float y, bool buttonHeld);
 
 } // namespace TouchOverlay
