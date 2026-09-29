@@ -395,6 +395,7 @@ struct KeyboardButtonState {
 	float downX = 0.0f, downY = 0.0f;        // normalized finger-down position
 	bool positionLoaded = false;
 	bool keyboardOpen = false;               // mirrors the engine's text input state for drawing
+	float fieldTop = -1.0f;                  // normalized top of the entry field being typed into, or -1
 };
 
 KeyboardButtonState s_kbButton;
@@ -469,6 +470,26 @@ void clampKeyboardButton()
 	s_kbButton.centerY = SDL_clamp(s_kbButton.centerY, halfH, 1.0f - halfH);
 }
 
+// Where the button is actually shown. While the keyboard is open it must not sit underneath it,
+// or it could not be tapped to close the keyboard again. The keyboard's height is not known here,
+// so keep the button in the top part of the screen; when an entry field is being typed into, SDL
+// slides the view so the field stays above the keyboard, and just above the field is visible too.
+// The saved position is untouched and applies again once the keyboard closes.
+void keyboardButtonCenter(float &x, float &y)
+{
+	x = s_kbButton.centerX;
+	y = s_kbButton.centerY;
+	float halfW = 0.0f, halfH = 0.0f;
+	if (!s_kbButton.keyboardOpen || !keyboardButtonHalfExtents(halfW, halfH)) {
+		return;
+	}
+	float limit = 0.30f;
+	if (s_kbButton.fieldTop >= 0.0f) {
+		limit = SDL_max(s_kbButton.fieldTop - halfH - 0.01f, halfH);
+	}
+	y = SDL_min(y, limit);
+}
+
 bool keyboardButtonHit(float x, float y)
 {
 	float halfW = 0.0f, halfH = 0.0f;
@@ -478,7 +499,9 @@ bool keyboardButtonHit(float x, float y)
 	// A little extra margin: the button is small and fingers are not.
 	halfW *= 1.2f;
 	halfH *= 1.2f;
-	return SDL_fabsf(x - s_kbButton.centerX) <= halfW && SDL_fabsf(y - s_kbButton.centerY) <= halfH;
+	float centerX = 0.0f, centerY = 0.0f;
+	keyboardButtonCenter(centerX, centerY);
+	return SDL_fabsf(x - centerX) <= halfW && SDL_fabsf(y - centerY) <= halfH;
 }
 
 // Returns true when the event belongs to the keyboard button (the gesture translator must not see
@@ -502,8 +525,10 @@ bool handleKeyboardButtonTouch(const SDL_Event &event, bool &toggleKeyboard)
 			s_kbButton.downTicks = SDL_GetTicks();
 			s_kbButton.downX = x;
 			s_kbButton.downY = y;
-			s_kbButton.grabX = x - s_kbButton.centerX;
-			s_kbButton.grabY = y - s_kbButton.centerY;
+			float centerX = 0.0f, centerY = 0.0f;
+			keyboardButtonCenter(centerX, centerY);
+			s_kbButton.grabX = x - centerX;
+			s_kbButton.grabY = y - centerY;
 			return true;
 		}
 		return false;
@@ -566,8 +591,10 @@ void SDL3TouchOverlay_Draw(void)
 	const Int screenW = TheDisplay->getWidth();
 	const Int screenH = TheDisplay->getHeight();
 	const Int side = (Int)((float)screenH * KB_BUTTON_SIZE_RATIO);
-	const Int left = (Int)(s_kbButton.centerX * (float)screenW) - side / 2;
-	const Int top = (Int)(s_kbButton.centerY * (float)screenH) - side / 2;
+	float centerX = 0.0f, centerY = 0.0f;
+	keyboardButtonCenter(centerX, centerY);
+	const Int left = (Int)(centerX * (float)screenW) - side / 2;
+	const Int top = (Int)(centerY * (float)screenH) - side / 2;
 
 	const bool dragging = s_kbButton.phase == KeyboardButtonState::DRAGGING;
 	const bool pressed = s_kbButton.phase == KeyboardButtonState::PRESSED;
@@ -932,6 +959,9 @@ void SDL3GameEngine::pollSDL3Events(void)
 						break;
 					}
 				}
+				if (event.type == SDL_EVENT_FINGER_DOWN) {
+					updateKeyboardForTouch(event.tfinger.x, event.tfinger.y);
+				}
 				if (TheMouse && m_SDLWindow) {
 					SDL3Mouse* mouse = dynamic_cast<SDL3Mouse*>(TheMouse);
 					if (mouse) {
@@ -1018,7 +1048,24 @@ void SDL3GameEngine::updateTextInputState(void)
 				SDL_SetTextInputArea(m_SDLWindow, nullptr, 0);
 			}
 #endif
-			if (SDL_StartTextInput(m_SDLWindow)) {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+			// GeneralsX @feature seastwood 29/09/2026 Plain keyboard: no autocorrect, spell checking
+			// or predictive text bar, and no automatic capitals (a capital would reach hotkeys as
+			// Shift+key). SDL maps autocorrect=false to UITextAutocorrectionTypeNo, which also
+			// removes the QuickType suggestion bar.
+			static SDL_PropertiesID s_textInputProps = 0;
+			if (s_textInputProps == 0) {
+				s_textInputProps = SDL_CreateProperties();
+				SDL_SetNumberProperty(s_textInputProps, SDL_PROP_TEXTINPUT_TYPE_NUMBER, SDL_TEXTINPUT_TYPE_TEXT);
+				SDL_SetNumberProperty(s_textInputProps, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, SDL_CAPITALIZE_NONE);
+				SDL_SetBooleanProperty(s_textInputProps, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, false);
+				SDL_SetBooleanProperty(s_textInputProps, SDL_PROP_TEXTINPUT_MULTILINE_BOOLEAN, false);
+			}
+			const bool started = SDL_StartTextInputWithProperties(m_SDLWindow, s_textInputProps);
+#else
+			const bool started = SDL_StartTextInput(m_SDLWindow);
+#endif
+			if (started) {
 				m_IsTextInputActive = true;
 			}
 		}
@@ -1032,8 +1079,51 @@ void SDL3GameEngine::updateTextInputState(void)
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 	s_kbButton.keyboardOpen = m_IsTextInputActive;
+	s_kbButton.fieldTop = -1.0f;
+	if (m_IsTextInputActive && wantsTextInput && TheDisplay != nullptr && TheDisplay->getHeight() > 0) {
+		Int fieldX = 0, fieldY = 0;
+		focusedWindow->winGetScreenPosition(&fieldX, &fieldY);
+		s_kbButton.fieldTop = (float)fieldY / (float)TheDisplay->getHeight();
+	}
 #endif
 }
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+// GeneralsX @feature seastwood 29/09/2026 Touches drive the on-screen keyboard like a native text
+// field: a touch anywhere except the entry field being typed into closes it, and a touch on that
+// field reopens it after it was closed. A touch on another entry field opens the keyboard for it
+// through the focus change the click causes.
+void SDL3GameEngine::updateKeyboardForTouch(float x, float y)
+{
+	if (!m_SDLWindow || TheDisplay == nullptr || TheWindowManager == nullptr) {
+		return;
+	}
+
+	GameWindow* focusedWindow = TheWindowManager->winGetFocus();
+	Bool insideField = FALSE;
+	if (focusedWindow != nullptr && BitIsSet(focusedWindow->winGetStyle(), GWS_ENTRY_FIELD)) {
+		Int fieldX = 0, fieldY = 0, fieldW = 0, fieldH = 0;
+		focusedWindow->winGetScreenPosition(&fieldX, &fieldY);
+		focusedWindow->winGetSize(&fieldW, &fieldH);
+		const float touchX = x * (float)TheDisplay->getWidth();
+		const float touchY = y * (float)TheDisplay->getHeight();
+		insideField = touchX >= (float)fieldX && touchX <= (float)(fieldX + fieldW) &&
+		              touchY >= (float)fieldY && touchY <= (float)(fieldY + fieldH);
+	}
+
+	if (m_IsTextInputActive && !insideField) {
+		SDL_StopTextInput(m_SDLWindow);
+		m_IsTextInputActive = false;
+		m_TextInputUserOpened = false;
+		m_TextInputDismissedFor = focusedWindow;
+	} else if (!m_IsTextInputActive && insideField && m_TextInputDismissedFor == focusedWindow) {
+		m_TextInputDismissedFor = nullptr;
+	} else {
+		return;
+	}
+	updateTextInputState();
+}
+#endif
 
 // GeneralsX @feature seastwood 29/09/2026 Floating keyboard button: show or hide the on-screen
 // keyboard regardless of which window has focus. With no entry field focused, typed keys still

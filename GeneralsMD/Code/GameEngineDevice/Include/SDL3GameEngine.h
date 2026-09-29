@@ -122,6 +122,11 @@ protected:
 	void forwardTextInputEvent(const char* utf8Text);
 	// GeneralsX @feature seastwood 29/09/2026 Show or hide the on-screen keyboard from the floating button.
 	void toggleOnScreenKeyboard(void);
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @feature seastwood 29/09/2026 Close the keyboard when a touch lands outside the
+	// entry field being typed into, reopen it on a touch on that field (x, y normalized).
+	void updateKeyboardForTouch(float x, float y);
+#endif
 	void handleKeyboardEvent(const SDL_KeyboardEvent& event);
 	void handleMouseMotionEvent(const SDL_MouseMotionEvent& event);
 	void handleMouseButtonEvent(const SDL_MouseButtonEvent& event);

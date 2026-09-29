@@ -209,9 +209,12 @@ screen.
   **Pinch**: zoom.
 - **Keyboard button** (the small translucent keyboard icon): tap it to show or
   hide the on-screen keyboard at any time. Long-press it, then drag, to move
-  it; the position is remembered.
+  it; the position is remembered. While the keyboard is open the button moves
+  up so it is never hidden behind the keyboard.
 - The keyboard also opens by itself when a text field (such as a save name)
-  is selected. Press **Return** to close it.
+  is selected. Press **Return** or tap anywhere outside the text field to
+  close it; tap the text field to bring it back. Autocorrect and the
+  predictive text bar are turned off.
 
 ---
 
