@@ -31,7 +31,10 @@
 **                     long-press: assign the current selection). Ctrl / Shift: tap = held for the
 **                     next tap on the game, long-press = locked until tapped again.
 **   Settings page     button size, opacity, keyboard button on/off, double-tap right-click,
-**                     edge scrolling, tap feedback rings
+**                     edge scrolling, tap feedback rings, cursor (trackpad) mode, D-pad
+**   Cursor            cursor mode draws its own arrow: iOS shows no system cursor on touch
+**   D-pad             optional thumb pad on the left edge, in a game: hold a direction to
+**                     scroll the camera (several fingers at once are fine)
 **   Tap feedback      a short ring where each click lands (white: left, orange: right)
 **
 ** Positions are normalized to the screen; drawing uses the display's pixel coordinates.
@@ -46,6 +49,8 @@
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
 
 #include "Common/AsciiString.h"
+#include "Common/FramePacer.h"
+#include "Common/GlobalData.h"
 #include "Common/MessageStream.h"
 #include "Common/UnicodeString.h"
 #include "GameClient/Color.h"
@@ -54,7 +59,9 @@
 #include "GameClient/DisplayStringManager.h"
 #include "GameClient/GameFont.h"
 #include "GameClient/GlobalLanguage.h"
+#include "GameClient/InGameUI.h"
 #include "GameClient/Keyboard.h"
+#include "GameClient/View.h"
 #include "GameLogic/GameLogic.h"
 #include "SDL3Device/GameClient/SDL3Keyboard.h"
 
@@ -81,6 +88,8 @@ struct OverlaySettings {
 	bool edgePan = true;
 	bool tapFeedback = true;
 	bool toolbarOpen = false;         // stays open until closed, remembered across launches
+	bool cursorMode = false;          // trackpad-style cursor instead of direct touch
+	bool dpadVisible = false;
 };
 
 OverlaySettings s_settings;
@@ -151,6 +160,8 @@ void loadSettings()
 		else if (name == "edge_pan") s_settings.edgePan = value != 0.0f;
 		else if (name == "tap_feedback") s_settings.tapFeedback = value != 0.0f;
 		else if (name == "toolbar_open") s_settings.toolbarOpen = value != 0.0f;
+		else if (name == "cursor_mode") s_settings.cursorMode = value != 0.0f;
+		else if (name == "dpad") s_settings.dpadVisible = value != 0.0f;
 	}
 	fclose(file);
 	clampSettings();
@@ -176,6 +187,8 @@ void saveSettings()
 	fprintf(file, "edge_pan=%d\n", s_settings.edgePan ? 1 : 0);
 	fprintf(file, "tap_feedback=%d\n", s_settings.tapFeedback ? 1 : 0);
 	fprintf(file, "toolbar_open=%d\n", s_settings.toolbarOpen ? 1 : 0);
+	fprintf(file, "cursor_mode=%d\n", s_settings.cursorMode ? 1 : 0);
+	fprintf(file, "dpad=%d\n", s_settings.dpadVisible ? 1 : 0);
 	fclose(file);
 }
 
@@ -380,7 +393,9 @@ enum ToolbarAction {
 	ACTION_TOGGLE_KEYBOARD_BUTTON,
 	ACTION_TOGGLE_DOUBLE_TAP,
 	ACTION_TOGGLE_EDGE_PAN,
-	ACTION_TOGGLE_TAP_FEEDBACK
+	ACTION_TOGGLE_TAP_FEEDBACK,
+	ACTION_TOGGLE_CURSOR_MODE,
+	ACTION_TOGGLE_DPAD
 };
 
 struct ToolbarButton {
@@ -411,6 +426,8 @@ const ToolbarButton SETTINGS_BUTTONS[] = {
 	{ "2-Tap",    ACTION_TOGGLE_DOUBLE_TAP, 0 },
 	{ "Edge",     ACTION_TOGGLE_EDGE_PAN, 0 },
 	{ "Rings",    ACTION_TOGGLE_TAP_FEEDBACK, 0 },
+	{ "Cursor",   ACTION_TOGGLE_CURSOR_MODE, 0 },
+	{ "D-pad",    ACTION_TOGGLE_DPAD, 0 },
 	{ "Back",     ACTION_CLOSE_SETTINGS, 0 },
 };
 
@@ -509,6 +526,8 @@ std::string buttonLabel(const ToolbarButton &button)
 	case ACTION_TOGGLE_DOUBLE_TAP: return onOff(button.label, s_settings.doubleTapRightClick);
 	case ACTION_TOGGLE_EDGE_PAN: return onOff(button.label, s_settings.edgePan);
 	case ACTION_TOGGLE_TAP_FEEDBACK: return onOff(button.label, s_settings.tapFeedback);
+	case ACTION_TOGGLE_CURSOR_MODE: return onOff(button.label, s_settings.cursorMode);
+	case ACTION_TOGGLE_DPAD: return onOff(button.label, s_settings.dpadVisible);
 	default: return std::string(button.label);
 	}
 }
@@ -589,6 +608,14 @@ void activateToolbarButton(const ToolbarButton &button, bool longPress)
 		break;
 	case ACTION_TOGGLE_TAP_FEEDBACK:
 		s_settings.tapFeedback = !s_settings.tapFeedback;
+		saveSettings();
+		break;
+	case ACTION_TOGGLE_CURSOR_MODE:
+		s_settings.cursorMode = !s_settings.cursorMode;
+		saveSettings();
+		break;
+	case ACTION_TOGGLE_DPAD:
+		s_settings.dpadVisible = !s_settings.dpadVisible;
 		saveSettings();
 		break;
 	}
@@ -729,6 +756,193 @@ void strokeRoundedRect(const Rect &rect, float radius, Color color, float lineWi
 		}
 	}
 	TheDisplay->drawLine((Int)prevX, (Int)prevY, (Int)firstX, (Int)firstY, lineWidth, color);
+}
+
+// Fill a simple polygon (display pixels) with 2 px horizontal spans, even-odd rule.
+void fillPolygon(const float *xs, const float *ys, Int count, Color color)
+{
+	float minY = ys[0], maxY = ys[0];
+	for (Int i = 1; i < count; ++i) {
+		minY = SDL_min(minY, ys[i]);
+		maxY = SDL_max(maxY, ys[i]);
+	}
+	const Int STEP = 2;
+	for (float y = minY; y < maxY; y += (float)STEP) {
+		const float scan = y + (float)STEP * 0.5f;
+		float hits[16];
+		Int hitCount = 0;
+		for (Int i = 0; i < count && hitCount < 16; ++i) {
+			const Int j = (i + 1) % count;
+			const float y0 = ys[i], y1 = ys[j];
+			if ((y0 <= scan && y1 > scan) || (y1 <= scan && y0 > scan)) {
+				hits[hitCount++] = xs[i] + (scan - y0) / (y1 - y0) * (xs[j] - xs[i]);
+			}
+		}
+		for (Int a = 1; a < hitCount; ++a) {   // insertion sort, a handful of hits
+			const float v = hits[a];
+			Int b = a - 1;
+			while (b >= 0 && hits[b] > v) {
+				hits[b + 1] = hits[b];
+				--b;
+			}
+			hits[b + 1] = v;
+		}
+		for (Int h = 0; h + 1 < hitCount; h += 2) {
+			TheDisplay->drawFillRect((Int)hits[h], (Int)y, (Int)(hits[h + 1] - hits[h]) + 1, STEP, color);
+		}
+	}
+}
+
+void strokePolygon(const float *xs, const float *ys, Int count, Color color, float lineWidth)
+{
+	for (Int i = 0; i < count; ++i) {
+		const Int j = (i + 1) % count;
+		TheDisplay->drawLine((Int)xs[i], (Int)ys[i], (Int)xs[j], (Int)ys[j], lineWidth, color);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cursor (cursor mode). iOS draws no system cursor for touch, so the overlay draws an arrow.
+// ---------------------------------------------------------------------------
+bool s_cursorVisible = false;
+float s_cursorX = 0.5f, s_cursorY = 0.5f;   // normalized tip position
+bool s_cursorHeld = false;                   // hold-drag in progress
+
+void drawCursor(float screenW, float screenH)
+{
+	if (!s_cursorVisible || !s_settings.cursorMode) {
+		return;
+	}
+	const float size = screenH * 0.045f * s_settings.scale;
+	const float tipX = s_cursorX * screenW;
+	const float tipY = s_cursorY * screenH;
+	// Classic arrow, tip at the hot spot.
+	const float shapeX[7] = { 0.0f, 0.0f, 0.27f, 0.45f, 0.60f, 0.42f, 0.76f };
+	const float shapeY[7] = { 0.0f, 1.0f, 0.76f, 1.12f, 1.05f, 0.70f, 0.70f };
+	float xs[7], ys[7];
+	for (Int i = 0; i < 7; ++i) {
+		xs[i] = tipX + shapeX[i] * size;
+		ys[i] = tipY + shapeY[i] * size;
+	}
+	const Color fill = s_cursorHeld ? GameMakeColor(255, 204, 0, 250) : GameMakeColor(255, 255, 255, 250);
+	fillPolygon(xs, ys, 7, fill);
+	strokePolygon(xs, ys, 7, GameMakeColor(0, 0, 0, 255), SDL_max(2.0f, screenH / 450.0f));
+}
+
+// ---------------------------------------------------------------------------
+// D-pad: thumb pad on the left edge that scrolls the camera while held. It tracks its own finger,
+// separately from the other overlay controls, so it works together with the cursor or a tap.
+// ---------------------------------------------------------------------------
+struct DpadState {
+	bool active = false;
+	SDL_TouchID touch = 0;
+	SDL_FingerID finger = 0;
+	float dirX = 0.0f, dirY = 0.0f;   // -1..1, dead zone applied
+};
+DpadState s_dpad;
+
+const float DPAD_DEAD_ZONE = 0.25f;
+const float DPAD_SPEED = 300.0f;   // 1.5x the keyboard scroll amount: "move the view quickly"
+
+bool dpadAvailable()
+{
+	return s_settings.dpadVisible && TheGameLogic != nullptr && TheGameLogic->isInGame() &&
+		!TheGameLogic->isInShellGame();
+}
+
+bool dpadGeometry(float screenW, float screenH, float &centerX, float &centerY, float &radius)
+{
+	if (!dpadAvailable()) {
+		return false;
+	}
+	const Insets insets = safeAreaInsets(screenW, screenH);
+	radius = screenH * 0.15f * s_settings.scale;
+	centerX = insets.left + screenH * 0.03f + radius;
+	centerY = screenH * 0.52f;
+	return true;
+}
+
+void dpadAim(float px, float py, float screenW, float screenH)
+{
+	float centerX = 0.0f, centerY = 0.0f, radius = 1.0f;
+	if (!dpadGeometry(screenW, screenH, centerX, centerY, radius)) {
+		s_dpad.dirX = s_dpad.dirY = 0.0f;
+		return;
+	}
+	float vx = (px - centerX) / radius;
+	float vy = (py - centerY) / radius;
+	const float length = SDL_sqrtf(vx * vx + vy * vy);
+	if (length < DPAD_DEAD_ZONE) {
+		s_dpad.dirX = s_dpad.dirY = 0.0f;
+		return;
+	}
+	const float strength = SDL_min(1.0f, (length - DPAD_DEAD_ZONE) / (1.0f - DPAD_DEAD_ZONE));
+	s_dpad.dirX = vx / length * strength;
+	s_dpad.dirY = vy / length * strength;
+}
+
+void drawDpad(float screenW, float screenH)
+{
+	float centerX = 0.0f, centerY = 0.0f, radius = 0.0f;
+	if (!dpadGeometry(screenW, screenH, centerX, centerY, radius)) {
+		return;
+	}
+	Rect base;
+	base.x = centerX - radius;
+	base.y = centerY - radius;
+	base.w = radius * 2.0f;
+	base.h = radius * 2.0f;
+	fillRoundedRect(base, radius, overlayColor(28, 28, 30, 110));
+	strokeRoundedRect(base, radius, overlayColor(255, 255, 255, 90), SDL_max(1.5f, screenH / 600.0f));
+
+	// Four arrows; the ones the thumb is pushing light up.
+	const float dirs[4][2] = { { 0.0f, -1.0f }, { 1.0f, 0.0f }, { 0.0f, 1.0f }, { -1.0f, 0.0f } };
+	const float arrowDistance = radius * 0.62f;
+	const float arrowSize = radius * 0.26f;
+	for (Int i = 0; i < 4; ++i) {
+		const float dx = dirs[i][0], dy = dirs[i][1];
+		const float push = s_dpad.active ? dx * s_dpad.dirX + dy * s_dpad.dirY : 0.0f;
+		const bool lit = push > 0.35f;
+		const float tipX = centerX + dx * (arrowDistance + arrowSize * 0.6f);
+		const float tipY = centerY + dy * (arrowDistance + arrowSize * 0.6f);
+		const float baseX = centerX + dx * (arrowDistance - arrowSize * 0.6f);
+		const float baseY = centerY + dy * (arrowDistance - arrowSize * 0.6f);
+		// Perpendicular for the arrow's base corners.
+		const float px = -dy * arrowSize, py = dx * arrowSize;
+		const float xs[3] = { tipX, baseX + px, baseX - px };
+		const float ys[3] = { tipY, baseY + py, baseY - py };
+		fillPolygon(xs, ys, 3, lit ? GameMakeColor(255, 255, 255, 240) : overlayColor(255, 255, 255, 150));
+	}
+	if (s_dpad.active) {
+		Rect knob;
+		const float knobRadius = radius * 0.22f;
+		knob.x = centerX + s_dpad.dirX * radius * 0.55f - knobRadius;
+		knob.y = centerY + s_dpad.dirY * radius * 0.55f - knobRadius;
+		knob.w = knobRadius * 2.0f;
+		knob.h = knobRadius * 2.0f;
+		fillRoundedRect(knob, knobRadius, GameMakeColor(255, 255, 255, 200));
+	}
+}
+
+void updateDpad()
+{
+	if (!s_dpad.active) {
+		return;
+	}
+	if (!dpadAvailable() || !TouchOverlay::fingerIsDown(s_dpad.touch, s_dpad.finger)) {
+		s_dpad = DpadState();
+		return;
+	}
+	if ((s_dpad.dirX == 0.0f && s_dpad.dirY == 0.0f) || TheTacticalView == nullptr || TheInGameUI == nullptr ||
+	    !TheInGameUI->getInputEnabled()) {
+		return;
+	}
+	const Real fpsRatio = TheFramePacer != nullptr ? TheFramePacer->getBaseOverUpdateFpsRatio() : 1.0f;
+	const Real amount = DPAD_SPEED * fpsRatio * TheGlobalData->m_keyboardScrollFactor;
+	Coord2D offset;
+	offset.x = s_dpad.dirX * TheGlobalData->m_horizontalScrollSpeedFactor * amount;
+	offset.y = s_dpad.dirY * TheGlobalData->m_verticalScrollSpeedFactor * amount;
+	TheTacticalView->userScrollBy(&offset);
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,6 +1271,29 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 	const float px = x * screenW;
 	const float py = y * screenH;
 
+	// The D-pad tracks its own finger and may be held together with any other touch.
+	if (s_dpad.active && event.tfinger.fingerID == s_dpad.finger && event.type != SDL_EVENT_FINGER_DOWN) {
+		if (event.type == SDL_EVENT_FINGER_MOTION) {
+			dpadAim(px, py, screenW, screenH);
+		} else {
+			s_dpad = DpadState();
+		}
+		return true;
+	}
+	if (event.type == SDL_EVENT_FINGER_DOWN && !s_dpad.active) {
+		float centerX = 0.0f, centerY = 0.0f, radius = 0.0f;
+		if (dpadGeometry(screenW, screenH, centerX, centerY, radius)) {
+			const float dx = px - centerX, dy = py - centerY;
+			if (dx * dx + dy * dy <= radius * radius * 1.2f) {
+				s_dpad.active = true;
+				s_dpad.touch = event.tfinger.touchID;
+				s_dpad.finger = event.tfinger.fingerID;
+				dpadAim(px, py, screenW, screenH);
+				return true;
+			}
+		}
+	}
+
 	switch (event.type) {
 	case SDL_EVENT_FINGER_DOWN:
 		{
@@ -1177,6 +1414,8 @@ void update(void)
 		resetPress("finger no longer on screen");
 	}
 
+	updateDpad();
+
 	// Long-presses: a stationary finger emits no events, so they are polled here.
 	if (s_press.target == PRESS_KEYBOARD_BUTTON && !s_press.moved && !s_press.dragging &&
 	    now - s_press.downTicks >= KEYBOARD_BUTTON_DRAG_MS) {
@@ -1229,6 +1468,7 @@ void draw(void)
 	} else {
 		s_layout.valid = false;
 	}
+	drawDpad(screenW, screenH);
 	drawKeyboardButton(screenW, screenH);
 	if (ownBatch) {
 		TheDisplay->endBatch();
@@ -1238,6 +1478,19 @@ void draw(void)
 
 	for (size_t i = 0; i < labels.size(); ++i) {
 		drawLabelCentered(labels[i].text, labels[i].rect, labels[i].color);
+	}
+
+	// The cursor goes over everything, labels included.
+	if (s_cursorVisible && s_settings.cursorMode) {
+		if (ownBatch) {
+			TheDisplay->beginBatch();
+		}
+		drawCursor(screenW, screenH);
+		if (ownBatch) {
+			TheDisplay->endBatch();
+		} else {
+			TheDisplay->flush();
+		}
 	}
 }
 
@@ -1297,6 +1550,20 @@ bool edgePanEnabled(void)
 {
 	ensureSettings();
 	return s_settings.edgePan;
+}
+
+bool cursorModeEnabled(void)
+{
+	ensureSettings();
+	return s_settings.cursorMode;
+}
+
+void setCursorState(bool visible, float x, float y, bool buttonHeld)
+{
+	s_cursorVisible = visible;
+	s_cursorX = x;
+	s_cursorY = y;
+	s_cursorHeld = buttonHeld;
 }
 
 } // namespace TouchOverlay

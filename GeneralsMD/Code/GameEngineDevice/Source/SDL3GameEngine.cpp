@@ -481,6 +481,366 @@ void updateTouchLongPress(SDL3Mouse *mouse, SDL_Window *window)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Cursor mode (trackpad)
+//
+// GeneralsX @feature seastwood 29/09/2026 Optional alternative to direct touch, switched in the
+// toolbar's settings page. The screen works like a laptop trackpad driving a visible cursor:
+//   1 finger slide            -> move the cursor (accelerated); a flick keeps it gliding
+//                                (inertia) until a finger touches the screen again
+//   1 finger tap              -> left click at the cursor
+//   1 finger hold, then slide -> left-button drag at the cursor (selection box, drag)
+//   2 finger tap              -> right click at the cursor
+//   2 finger slide            -> scroll the camera; pinch -> zoom
+//   cursor at a screen edge   -> scroll the camera, like pushing the mouse against it on PC
+// Positions are window points, like the gesture translator above.
+// ---------------------------------------------------------------------------
+struct CursorState {
+	enum Phase {
+		IDLE,        // no finger on the game
+		ONE,         // one finger: moving the cursor, may still become a tap or a hold-drag
+		DRAG,        // hold-drag: left button held while the finger moves the cursor
+		TWO,         // two fingers: may become a right click, scrolls/zooms when they move
+		WAIT_LIFT    // gesture finished, remaining finger is ignored until it lifts
+	};
+
+	Phase phase = IDLE;
+	bool initialized = false;
+	float x = 0.0f, y = 0.0f;          // cursor position
+	float vx = 0.0f, vy = 0.0f;        // cursor velocity (points per second) for inertia
+	SDL_TouchID touch = 0;
+	SDL_FingerID finger1 = 0, finger2 = 0;
+	float f1x = 0.0f, f1y = 0.0f, f2x = 0.0f, f2y = 0.0f;   // finger positions
+	Uint64 downTicks = 0;
+	Uint64 lastMoveTicks = 0;
+	float travel = 0.0f;               // finger travel since the gesture started
+	float pinchDist = 0.0f;
+	Uint64 lastFrameTicks = 0;
+};
+
+CursorState s_cursor;
+bool s_cursorModeActive = false;
+
+const float CURSOR_TAP_SLOP = 10.0f;          // finger travel that is still a tap
+const Uint64 CURSOR_TAP_MS = 300;
+const Uint64 CURSOR_HOLD_DRAG_MS = 450;       // hold still this long to start a drag
+const float CURSOR_GAIN = 1.2f;               // cursor points per finger point, slow moves
+const float CURSOR_ACCEL_SPEED = 800.0f;      // finger speed (points/s) that doubles the gain
+const float CURSOR_MAX_GAIN = 3.5f;
+const float CURSOR_FRICTION = 0.93f;          // velocity kept per 1/60 s of gliding
+const float CURSOR_MIN_SPEED = 20.0f;         // below this a glide stops
+const float CURSOR_THROW_SPEED = 150.0f;      // release speed that starts a glide
+const float CURSOR_EDGE = 0.01f;              // normalized edge band that scrolls the camera
+// Two-finger scroll: camera offset per display pixel of finger movement. View::scrollBy maps its
+// offset through the view plane independently of resolution; this keeps the map roughly under
+// the fingers at the default camera height.
+const float CURSOR_PAN_GAIN = 2.5f;
+
+bool cursorGestureIdle()
+{
+	return s_cursor.phase == CursorState::IDLE;
+}
+
+void cursorClamp(int winW, int winH)
+{
+	const float maxX = (float)SDL_max(winW - 1, 0);
+	const float maxY = (float)SDL_max(winH - 1, 0);
+	if (s_cursor.x <= 0.0f || s_cursor.x >= maxX) {
+		s_cursor.vx = 0.0f;
+	}
+	if (s_cursor.y <= 0.0f || s_cursor.y >= maxY) {
+		s_cursor.vy = 0.0f;
+	}
+	s_cursor.x = SDL_clamp(s_cursor.x, 0.0f, maxX);
+	s_cursor.y = SDL_clamp(s_cursor.y, 0.0f, maxY);
+}
+
+void cursorPublish(int winW, int winH)
+{
+	if (winW > 0 && winH > 0) {
+		TouchOverlay::setCursorState(true, s_cursor.x / (float)winW, s_cursor.y / (float)winH,
+		                             s_cursor.phase == CursorState::DRAG);
+	}
+}
+
+void cursorClick(SDL3Mouse *mouse, SDL_Window *window, Uint8 button, int winW, int winH)
+{
+	sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+	sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN, s_cursor.x, s_cursor.y, button);
+	sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_cursor.x, s_cursor.y, button);
+	if (winW > 0 && winH > 0) {
+		TouchOverlay::addTapFeedback(s_cursor.x / (float)winW, s_cursor.y / (float)winH, button == SDL_BUTTON_RIGHT);
+	}
+	TouchOverlay::onGameGestureEnded();
+}
+
+bool cameraControlAvailable()
+{
+	return TheGameLogic != nullptr && TheGameLogic->isInGame() && !TheGameLogic->isInShellGame() &&
+		TheTacticalView != nullptr && TheInGameUI != nullptr && TheInGameUI->getInputEnabled();
+}
+
+// Scroll by a finger movement in window points: the map follows the fingers.
+void cursorPanCamera(float dx, float dy, int winW, int winH)
+{
+	if (!cameraControlAvailable() || TheDisplay == nullptr || winW <= 0 || winH <= 0) {
+		return;
+	}
+	const float pixelsPerPointX = (float)TheDisplay->getWidth() / (float)winW;
+	const float pixelsPerPointY = (float)TheDisplay->getHeight() / (float)winH;
+	Coord2D offset;
+	offset.x = -dx * pixelsPerPointX * CURSOR_PAN_GAIN;
+	offset.y = -dy * pixelsPerPointY * CURSOR_PAN_GAIN;
+	TheTacticalView->userScrollBy(&offset);
+}
+
+// Returns true when the gesture produced a left click (the engine then updates the on-screen
+// keyboard for a click at the cursor, as it does for a direct tap).
+bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &event)
+{
+	int winW = 0, winH = 0;
+	SDL_GetWindowSize(window, &winW, &winH);
+	const float px = event.tfinger.x * (float)winW;
+	const float py = event.tfinger.y * (float)winH;
+	const Uint64 now = SDL_GetTicks();
+	bool leftClicked = false;
+
+	switch (event.type) {
+	case SDL_EVENT_FINGER_DOWN:
+		if (s_cursor.phase == CursorState::IDLE) {
+			// A touch stops a gliding cursor, like putting a hand on a trackball.
+			s_cursor.vx = 0.0f;
+			s_cursor.vy = 0.0f;
+			s_cursor.touch = event.tfinger.touchID;
+			s_cursor.finger1 = event.tfinger.fingerID;
+			s_cursor.f1x = px;
+			s_cursor.f1y = py;
+			s_cursor.downTicks = now;
+			s_cursor.lastMoveTicks = now;
+			s_cursor.travel = 0.0f;
+			s_cursor.phase = CursorState::ONE;
+		} else if (s_cursor.phase == CursorState::ONE) {
+			s_cursor.finger2 = event.tfinger.fingerID;
+			s_cursor.f2x = px;
+			s_cursor.f2y = py;
+			s_cursor.downTicks = now;
+			s_cursor.travel = 0.0f;
+			s_cursor.pinchDist = SDL_sqrtf((s_cursor.f1x - px) * (s_cursor.f1x - px) + (s_cursor.f1y - py) * (s_cursor.f1y - py));
+			s_cursor.phase = CursorState::TWO;
+		}
+		// DRAG / TWO / WAIT_LIFT with extra fingers: ignored
+		break;
+
+	case SDL_EVENT_FINGER_MOTION:
+		if ((s_cursor.phase == CursorState::ONE || s_cursor.phase == CursorState::DRAG) &&
+		    event.tfinger.fingerID == s_cursor.finger1) {
+			const float dx = px - s_cursor.f1x;
+			const float dy = py - s_cursor.f1y;
+			s_cursor.f1x = px;
+			s_cursor.f1y = py;
+			s_cursor.travel += SDL_fabsf(dx) + SDL_fabsf(dy);
+			const float dt = SDL_max(0.001f, (float)(now - s_cursor.lastMoveTicks) / 1000.0f);
+			s_cursor.lastMoveTicks = now;
+			const float fingerSpeed = SDL_sqrtf(dx * dx + dy * dy) / dt;
+			const float gain = SDL_min(CURSOR_MAX_GAIN, CURSOR_GAIN * (1.0f + fingerSpeed / CURSOR_ACCEL_SPEED));
+			s_cursor.x += dx * gain;
+			s_cursor.y += dy * gain;
+			// Smoothed velocity for the glide after release.
+			s_cursor.vx = s_cursor.vx * 0.6f + (dx * gain / dt) * 0.4f;
+			s_cursor.vy = s_cursor.vy * 0.6f + (dy * gain / dt) * 0.4f;
+			cursorClamp(winW, winH);
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+		} else if (s_cursor.phase == CursorState::TWO &&
+		           (event.tfinger.fingerID == s_cursor.finger1 || event.tfinger.fingerID == s_cursor.finger2)) {
+			const float oldCx = (s_cursor.f1x + s_cursor.f2x) * 0.5f;
+			const float oldCy = (s_cursor.f1y + s_cursor.f2y) * 0.5f;
+			if (event.tfinger.fingerID == s_cursor.finger1) {
+				s_cursor.f1x = px;
+				s_cursor.f1y = py;
+			} else {
+				s_cursor.f2x = px;
+				s_cursor.f2y = py;
+			}
+			const float dx = (s_cursor.f1x + s_cursor.f2x) * 0.5f - oldCx;
+			const float dy = (s_cursor.f1y + s_cursor.f2y) * 0.5f - oldCy;
+			s_cursor.travel += SDL_fabsf(dx) + SDL_fabsf(dy);
+			if (s_cursor.travel > CURSOR_TAP_SLOP) {
+				cursorPanCamera(dx, dy, winW, winH);
+			}
+			const float dist = SDL_sqrtf((s_cursor.f1x - s_cursor.f2x) * (s_cursor.f1x - s_cursor.f2x) +
+			                             (s_cursor.f1y - s_cursor.f2y) * (s_cursor.f1y - s_cursor.f2y));
+			if (s_cursor.pinchDist > 1.0f) {
+				const float ratio = dist / s_cursor.pinchDist;
+				if (ratio > 1.0f + PINCH_STEP_RATIO || ratio < 1.0f - PINCH_STEP_RATIO) {
+					s_cursor.travel += CURSOR_TAP_SLOP;   // a pinch is not a tap
+					sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_WHEEL, s_cursor.x, s_cursor.y, 0,
+					                   ratio > 1.0f ? 1.0f : -1.0f);
+					s_cursor.pinchDist = dist;
+				}
+			}
+		}
+		break;
+
+	case SDL_EVENT_FINGER_UP:
+	case SDL_EVENT_FINGER_CANCELED:
+		{
+			const bool canceled = event.type == SDL_EVENT_FINGER_CANCELED;
+			switch (s_cursor.phase) {
+			case CursorState::ONE:
+				if (event.tfinger.fingerID != s_cursor.finger1) {
+					break;
+				}
+				if (!canceled && s_cursor.travel <= CURSOR_TAP_SLOP && now - s_cursor.downTicks <= CURSOR_TAP_MS) {
+					s_cursor.vx = 0.0f;
+					s_cursor.vy = 0.0f;
+					cursorClick(mouse, window, SDL_BUTTON_LEFT, winW, winH);
+					leftClicked = true;
+				} else if (canceled || now - s_cursor.lastMoveTicks > 60 ||
+				           SDL_sqrtf(s_cursor.vx * s_cursor.vx + s_cursor.vy * s_cursor.vy) < CURSOR_THROW_SPEED) {
+					// The finger stopped before lifting: no glide.
+					s_cursor.vx = 0.0f;
+					s_cursor.vy = 0.0f;
+				}
+				s_cursor.phase = CursorState::IDLE;
+				break;
+			case CursorState::DRAG:
+				if (event.tfinger.fingerID != s_cursor.finger1) {
+					break;
+				}
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
+				TouchOverlay::onGameGestureEnded();
+				s_cursor.vx = 0.0f;
+				s_cursor.vy = 0.0f;
+				s_cursor.phase = CursorState::IDLE;
+				break;
+			case CursorState::TWO:
+				if (event.tfinger.fingerID != s_cursor.finger1 && event.tfinger.fingerID != s_cursor.finger2) {
+					break;
+				}
+				if (!canceled && s_cursor.travel <= CURSOR_TAP_SLOP && now - s_cursor.downTicks <= CURSOR_TAP_MS) {
+					cursorClick(mouse, window, SDL_BUTTON_RIGHT, winW, winH);
+				}
+				// The other finger is still down: ignore it until it lifts too.
+				s_cursor.finger1 = event.tfinger.fingerID == s_cursor.finger1 ? s_cursor.finger2 : s_cursor.finger1;
+				s_cursor.phase = CursorState::WAIT_LIFT;
+				break;
+			case CursorState::WAIT_LIFT:
+				if (event.tfinger.fingerID == s_cursor.finger1) {
+					s_cursor.phase = CursorState::IDLE;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+		break;
+	}
+
+	cursorPublish(winW, winH);
+	return leftClicked;
+}
+
+// Per frame: lost-lift recovery, hold-to-drag, inertia and edge scrolling.
+void updateCursorMode(SDL3Mouse *mouse, SDL_Window *window)
+{
+	int winW = 0, winH = 0;
+	SDL_GetWindowSize(window, &winW, &winH);
+	if (winW <= 0 || winH <= 0) {
+		return;
+	}
+	const Uint64 now = SDL_GetTicks();
+	const float dt = s_cursor.lastFrameTicks != 0 ? SDL_min(0.1f, (float)(now - s_cursor.lastFrameTicks) / 1000.0f) : 0.0f;
+	s_cursor.lastFrameTicks = now;
+
+	if (!s_cursor.initialized) {
+		s_cursor.initialized = true;
+		s_cursor.x = (float)winW * 0.5f;
+		s_cursor.y = (float)winH * 0.5f;
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+	}
+
+	// Same lost-lift recovery as the direct-touch translator (see updateTouchLongPress).
+	if (s_cursor.phase != CursorState::IDLE && !TouchOverlay::fingerIsDown(s_cursor.touch, s_cursor.finger1)) {
+		const bool secondStillDown = s_cursor.phase == CursorState::TWO &&
+			TouchOverlay::fingerIsDown(s_cursor.touch, s_cursor.finger2);
+		if (!secondStillDown) {
+			fprintf(stderr, "INFO: touch: cursor finger lifted without an up event (phase %d), resetting\n",
+			        (int)s_cursor.phase);
+			if (s_cursor.phase == CursorState::DRAG) {
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
+				TouchOverlay::onGameGestureEnded();
+			}
+			s_cursor.phase = CursorState::IDLE;
+		}
+	}
+
+	if (s_cursor.phase == CursorState::ONE && s_cursor.travel <= CURSOR_TAP_SLOP &&
+	    now - s_cursor.downTicks >= CURSOR_HOLD_DRAG_MS) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN, s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
+		TouchOverlay::addTapFeedback(s_cursor.x / (float)winW, s_cursor.y / (float)winH, false);
+		s_cursor.phase = CursorState::DRAG;
+	}
+
+	if (s_cursor.phase == CursorState::IDLE && dt > 0.0f &&
+	    (s_cursor.vx != 0.0f || s_cursor.vy != 0.0f)) {
+		s_cursor.x += s_cursor.vx * dt;
+		s_cursor.y += s_cursor.vy * dt;
+		const float decay = SDL_powf(CURSOR_FRICTION, dt * 60.0f);
+		s_cursor.vx *= decay;
+		s_cursor.vy *= decay;
+		if (SDL_sqrtf(s_cursor.vx * s_cursor.vx + s_cursor.vy * s_cursor.vy) < CURSOR_MIN_SPEED) {
+			s_cursor.vx = 0.0f;
+			s_cursor.vy = 0.0f;
+		}
+		cursorClamp(winW, winH);
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+	}
+
+	// Cursor resting against a screen edge scrolls the camera that way.
+	if (TouchOverlay::edgePanEnabled() && cameraControlAvailable() && s_cursor.phase != CursorState::TWO) {
+		const float nx = s_cursor.x / (float)winW;
+		const float ny = s_cursor.y / (float)winH;
+		const float dirX = nx <= CURSOR_EDGE ? -1.0f : (nx >= 1.0f - CURSOR_EDGE ? 1.0f : 0.0f);
+		const float dirY = ny <= CURSOR_EDGE ? -1.0f : (ny >= 1.0f - CURSOR_EDGE ? 1.0f : 0.0f);
+		if (dirX != 0.0f || dirY != 0.0f) {
+			const Real fpsRatio = TheFramePacer != nullptr ? TheFramePacer->getBaseOverUpdateFpsRatio() : 1.0f;
+			const Real amount = EDGE_PAN_SPEED * fpsRatio * TheGlobalData->m_keyboardScrollFactor;
+			Coord2D offset;
+			offset.x = dirX * TheGlobalData->m_horizontalScrollSpeedFactor * amount;
+			offset.y = dirY * TheGlobalData->m_verticalScrollSpeedFactor * amount;
+			TheTacticalView->userScrollBy(&offset);
+		}
+	}
+
+	cursorPublish(winW, winH);
+}
+
+// Switching modes mid-gesture: release whatever the old mode was holding.
+void resetTouchModes(SDL3Mouse *mouse, SDL_Window *window)
+{
+	if (s_touch.phase == TouchState::DRAGGING) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_touch.lastX, s_touch.lastY, SDL_BUTTON_LEFT);
+	} else if (s_touch.phase == TouchState::PAN) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_touch.panX, s_touch.panY, SDL_BUTTON_RIGHT);
+	}
+	s_touch.phase = TouchState::IDLE;
+
+	if (s_cursor.phase == CursorState::DRAG) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
+	}
+	s_cursor.phase = CursorState::IDLE;
+	s_cursor.vx = 0.0f;
+	s_cursor.vy = 0.0f;
+	s_cursor.initialized = false;
+	TouchOverlay::setCursorState(false, 0.0f, 0.0f, false);
+}
+
+bool touchGestureIdle()
+{
+	return s_cursorModeActive ? cursorGestureIdle() : s_touch.phase == TouchState::IDLE;
+}
+
 } // anonymous namespace
 #endif // TARGET_OS_IPHONE
 
@@ -811,12 +1171,27 @@ void SDL3GameEngine::pollSDL3Events(void)
 				{
 					// The floating keyboard button claims touches that start on it.
 					bool toggleKeyboard = false;
-					if (TouchOverlay::handleFingerEvent(event, s_touch.phase == TouchState::IDLE, toggleKeyboard)) {
+					if (TouchOverlay::handleFingerEvent(event, touchGestureIdle(), toggleKeyboard)) {
 						if (toggleKeyboard) {
 							toggleOnScreenKeyboard();
 						}
 						break;
 					}
+				}
+				if (s_cursorModeActive) {
+					// Cursor mode: the finger is not where the click lands, so the keyboard follows
+					// clicks at the cursor instead of touch-downs.
+					if (TheMouse && m_SDLWindow) {
+						SDL3Mouse* mouse = dynamic_cast<SDL3Mouse*>(TheMouse);
+						if (mouse && handleCursorTouchEvent(mouse, m_SDLWindow, event)) {
+							int winW = 0, winH = 0;
+							SDL_GetWindowSize(m_SDLWindow, &winW, &winH);
+							if (winW > 0 && winH > 0) {
+								updateKeyboardForTouch(s_cursor.x / (float)winW, s_cursor.y / (float)winH);
+							}
+						}
+					}
+					break;
 				}
 				if (event.type == SDL_EVENT_FINGER_DOWN) {
 					updateKeyboardForTouch(event.tfinger.x, event.tfinger.y);
@@ -848,7 +1223,16 @@ void SDL3GameEngine::pollSDL3Events(void)
 	if (TheMouse && m_SDLWindow) {
 		SDL3Mouse* touchMouse = dynamic_cast<SDL3Mouse*>(TheMouse);
 		if (touchMouse) {
-			updateTouchLongPress(touchMouse, m_SDLWindow);
+			const bool cursorMode = TouchOverlay::cursorModeEnabled();
+			if (cursorMode != s_cursorModeActive) {
+				resetTouchModes(touchMouse, m_SDLWindow);
+				s_cursorModeActive = cursorMode;
+			}
+			if (s_cursorModeActive) {
+				updateCursorMode(touchMouse, m_SDLWindow);
+			} else {
+				updateTouchLongPress(touchMouse, m_SDLWindow);
+			}
 		}
 	}
 #endif

@@ -59,5 +59,10 @@ bool fingerIsDown(SDL_TouchID touchID, SDL_FingerID fingerID);
 /// Settings read by the gesture translator.
 bool doubleTapRightClickEnabled(void);
 bool edgePanEnabled(void);
+bool cursorModeEnabled(void);
+
+/// Cursor mode: where to draw the cursor (normalized screen coordinates), and whether the left
+/// button is held by a hold-drag.
+void setCursorState(bool visible, float x, float y, bool buttonHeld);
 
 } // namespace TouchOverlay

@@ -227,8 +227,22 @@ screen.
     force-attack, Shift+tap adds to a selection or queues waypoints.
   - **Opts**: button size, transparency (**Fade**), the keyboard button on or
     off, **2-Tap** (a quick second tap is a right click; off by default
-    because the first tap is still a left click), edge scrolling, and the
-    tap rings. Settings are saved in `Documents/touch-overlay.ini`.
+    because the first tap is still a left click), edge scrolling, the tap
+    rings, **Cursor** mode and the **D-pad**. Settings are saved in
+    `Documents/touch-overlay.ini`.
+- **Cursor mode** (Opts → **Cursor: On**): the screen works like a laptop
+  trackpad with an on-screen arrow instead of tapping things directly.
+  - Slide one finger to move the cursor; flick to send it gliding, and touch
+    the screen to stop it.
+  - **Tap**: left click at the cursor. **Two-finger tap**: right click.
+  - **Touch and hold, then slide**: drag with the left button held (selection
+    box); the cursor turns yellow while dragging.
+  - **Two-finger slide**: scroll the map. **Pinch**: zoom.
+  - Push the cursor against a screen edge to scroll the map, like on PC.
+  - The overlay buttons (Hotkeys, keyboard, D-pad) are still tapped directly.
+- **D-pad** (Opts → **D-pad: On**, in a game): a round thumb pad on the left.
+  Hold a direction to scroll the map quickly (diagonals work, and further
+  from the center is faster). It works together with a finger on the cursor.
 - **Keyboard button** (the small translucent keyboard icon): tap it to show or
   hide the on-screen keyboard at any time. Long-press it, then drag, to move
   it; the position is remembered. While the keyboard is open the button moves
