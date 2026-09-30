@@ -287,8 +287,8 @@ game picks it up automatically, and a cursor appears when you use it.
 | R3 (press right stick) | Stop |
 
 Use the right stick to scroll the map, or push the cursor against a screen
-edge. Touching the screen hides the
-controller cursor until you use the controller again.
+edge. Touching the screen hides the controller cursor until you use the
+controller again.
 
 ---
 
