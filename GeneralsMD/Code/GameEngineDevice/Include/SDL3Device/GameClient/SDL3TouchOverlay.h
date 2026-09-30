@@ -63,7 +63,6 @@ bool fingerIsDown(SDL_TouchID touchID, SDL_FingerID fingerID);
 
 /// Settings read by the gesture translator.
 bool doubleTapRightClickEnabled(void);
-bool edgePanEnabled(void);
 bool cursorModeEnabled(void);
 
 /// Cursor sensitivity multiplier from the Speed setting (Low 0.45, Medium 0.7, High 1.0,
@@ -71,6 +70,11 @@ bool cursorModeEnabled(void);
 float cursorSensitivity(void);
 
 bool autosaveEnabled(void);
+
+/// Apply the Guard setting: whether iOS system edge swipes are deferred (need a second swipe).
+/// Deferring them makes iOS hold back all touches while a finger rests near an edge, so it is off
+/// by default. Called at launch before the window exists, and again when the setting changes.
+void applyEdgeGuard(void);
 
 /// Internal render resolution as a fraction of the screen (1.0, 0.75 or 0.5). The first call
 /// fixes the value for this run: SDL3Main reads it at launch to choose -xres/-yres.

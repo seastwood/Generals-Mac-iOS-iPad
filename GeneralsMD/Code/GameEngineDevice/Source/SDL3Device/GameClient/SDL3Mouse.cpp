@@ -31,6 +31,9 @@
 #include "SDL3Device/GameClient/SDL3Mouse.h"
 #include <cstdio>
 #include <cstring>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 // GeneralsX @bugfix felipebraz 18/02/2026 Include GameLogic for frame tracking
 #include "GameLogic/GameLogic.h"
@@ -536,6 +539,12 @@ void SDL3Mouse::capture(void)
 	if (!m_Window || m_IsCaptured) {
 		return;
 	}
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @tweak seastwood 30/09/2026 A touch screen has no mouse to confine, and the only use
+	// of the captured state is the game's screen-edge scrolling: a tap or the trackpad cursor within
+	// a few pixels of an edge scrolled the camera until the next movement. Never capture on iOS.
+	return;
+#endif
 
 	// SDL3: Capture mouse to window
 	SDL_CaptureMouse(true);

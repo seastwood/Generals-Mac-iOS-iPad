@@ -208,8 +208,6 @@ screen.
   box. **Long-press**: right click. **Two-finger drag**: move the camera.
   **Pinch**: zoom. A short ring shows where each click landed (white: left,
   orange: right).
-- **Edge scrolling**: rest a finger at the edge of the screen (not on the
-  control bar or other buttons) to scroll the camera that way.
 - **Hotkey toolbar** (in a game): tap the **Hotkeys** button in the top-right
   corner to open it and **Hide** (same place) to close it. It stays open until
   you close it, and is remembered next time. A button lights up white while
@@ -227,12 +225,15 @@ screen.
     force-attack, Shift+tap adds to a selection or queues waypoints.
   - **Opts**: button size, transparency (**Fade**), the keyboard button on or
     off, **2-Tap** (a quick second tap is a right click; off by default
-    because the first tap is still a left click), edge scrolling, the tap
+    because the first tap is still a left click), the tap
     rings, **Cursor** mode, the **D-pad**, **FPS** (frame-rate limit: Game /
     30 / 60 / 120; lower saves battery and heat), **Res** (render resolution
     100% / 75% / 50%: lower makes the game's own UI and text bigger and runs
-    cooler, applies the next time the game starts), **Haptics** and
-    **Autosave**. Settings are saved in `Documents/touch-overlay.ini`.
+    cooler, applies the next time the game starts), **Haptics**,
+    **Autosave** and **Guard** (off by default; when on, Control Center,
+    Notification Center and the home swipe need a second swipe, but iOS then
+    delays all touches while a finger rests near a screen edge). Settings are
+    saved in `Documents/touch-overlay.ini`.
 - **Autosave**: when you leave the app during a campaign or skirmish game, it
   saves to **Autosave** (in the Load menu), because iOS may close a
   backgrounded game at any time.
@@ -249,7 +250,6 @@ screen.
   - **Touch and hold, then slide**: drag with the left button held (selection
     box); the cursor turns yellow while dragging.
   - **Two-finger slide**: scroll the map. **Pinch**: zoom.
-  - Push the cursor against a screen edge to scroll the map, like on PC.
   - The overlay buttons (Hotkeys, keyboard, D-pad) are still tapped directly.
 - **D-pad** (Opts → **D-pad: On**, in a game): a round thumb pad on the left.
   Hold a direction to scroll the map quickly (diagonals work, and further
@@ -285,9 +285,8 @@ game picks it up automatically, and a cursor appears when you use it.
 | L3 (press left stick) | Jump to the latest radar event |
 | R3 (press right stick) | Stop |
 
-Pushing the cursor against a screen edge scrolls the map (the **Edge**
-setting). Touching the screen hides the controller cursor until you use the
-controller again.
+Use the right stick to scroll the map. Touching the screen hides the
+controller cursor until you use the controller again.
 
 ---
 
@@ -335,7 +334,7 @@ cmake --build build/ios-vulkan --target z_generals
 | `Apple Development: ambiguous` | Duplicate certificates in the keychain. The script now picks the right one automatically; you can also delete the duplicate in **Keychain Access → login → My Certificates**. |
 | `The specified device was not found` | Set `GX_DEVICE_ID` in `ios/signing.env` (setup step 6.3). |
 | App shows a black screen and closes at once | That is the empty placeholder from pressing Run in Xcode. Delete it and run the package command. |
-| Touches are ignored for a few seconds | A thumb or palm resting on the screen edge counts as a touch. Newer builds let a new touch take over from it; if it still happens, pull the log and look for `input:`, `touch:` and `app inactive` lines around that time. |
+| Touches are ignored for seconds, then all happen at once | iOS held them back because a finger rested near a screen edge while **Guard** was on. Turn **Guard** off in **Opts** (the default). If it still happens, pull the log and look for `input health` and `reached the game ... ms after` lines. |
 | App crashes or misbehaves | Pull the game's log (below) and look at the last lines. |
 
 To pull the game's log from the device after a session (use your own bundle

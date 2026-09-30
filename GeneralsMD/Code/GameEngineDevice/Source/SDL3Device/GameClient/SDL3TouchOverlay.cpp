@@ -31,9 +31,9 @@
 **                     long-press: assign the current selection). Ctrl / Shift: tap = held for the
 **                     next tap on the game, long-press = locked until tapped again.
 **   Settings page     button size, opacity, keyboard button on/off, double-tap right-click,
-**                     edge scrolling, tap feedback rings, cursor (trackpad) mode, D-pad,
+**                     tap feedback rings, cursor (trackpad) mode, D-pad,
 **                     cursor speed, frame-rate limit, render resolution (next launch), haptics,
-**                     autosave
+**                     autosave, edge guard (iOS system swipes need a second swipe)
 **   Cursor            cursor mode draws its own arrow: iOS shows no system cursor on touch
 **   D-pad             optional thumb pad on the left edge, in a game: hold a direction to
 **                     scroll the camera (several fingers at once are fine)
@@ -94,7 +94,6 @@ struct OverlaySettings {
 	float scale = 1.0f;               // size of the overlay controls
 	float opacity = 1.0f;             // multiplies every overlay alpha
 	bool doubleTapRightClick = false; // off by default: the first tap is already a left click
-	bool edgePan = true;
 	bool tapFeedback = true;
 	bool toolbarOpen = false;         // stays open until closed, remembered across launches
 	bool cursorMode = false;          // trackpad-style cursor instead of direct touch
@@ -104,6 +103,7 @@ struct OverlaySettings {
 	bool haptics = true;
 	bool autosave = true;             // save a single-player game when leaving the app
 	Int cursorSpeed = 1;              // cursor sensitivity: 0 low, 1 medium, 2 high, 3 extreme
+	bool edgeGuard = false;           // defer iOS edge swipes; off: they delay touches (see applyEdgeGuard)
 };
 
 OverlaySettings s_settings;
@@ -178,7 +178,6 @@ void loadSettings()
 		else if (name == "scale") s_settings.scale = value;
 		else if (name == "opacity") s_settings.opacity = value;
 		else if (name == "double_tap_right_click") s_settings.doubleTapRightClick = value != 0.0f;
-		else if (name == "edge_pan") s_settings.edgePan = value != 0.0f;
 		else if (name == "tap_feedback") s_settings.tapFeedback = value != 0.0f;
 		else if (name == "toolbar_open") s_settings.toolbarOpen = value != 0.0f;
 		else if (name == "cursor_mode") s_settings.cursorMode = value != 0.0f;
@@ -188,6 +187,7 @@ void loadSettings()
 		else if (name == "haptics") s_settings.haptics = value != 0.0f;
 		else if (name == "autosave") s_settings.autosave = value != 0.0f;
 		else if (name == "cursor_speed") s_settings.cursorSpeed = (Int)value;
+		else if (name == "edge_guard") s_settings.edgeGuard = value != 0.0f;
 	}
 	fclose(file);
 	clampSettings();
@@ -210,7 +210,6 @@ void saveSettings()
 	fprintf(file, "scale=%f\n", s_settings.scale);
 	fprintf(file, "opacity=%f\n", s_settings.opacity);
 	fprintf(file, "double_tap_right_click=%d\n", s_settings.doubleTapRightClick ? 1 : 0);
-	fprintf(file, "edge_pan=%d\n", s_settings.edgePan ? 1 : 0);
 	fprintf(file, "tap_feedback=%d\n", s_settings.tapFeedback ? 1 : 0);
 	fprintf(file, "toolbar_open=%d\n", s_settings.toolbarOpen ? 1 : 0);
 	fprintf(file, "cursor_mode=%d\n", s_settings.cursorMode ? 1 : 0);
@@ -220,6 +219,7 @@ void saveSettings()
 	fprintf(file, "haptics=%d\n", s_settings.haptics ? 1 : 0);
 	fprintf(file, "autosave=%d\n", s_settings.autosave ? 1 : 0);
 	fprintf(file, "cursor_speed=%d\n", (int)s_settings.cursorSpeed);
+	fprintf(file, "edge_guard=%d\n", s_settings.edgeGuard ? 1 : 0);
 	fclose(file);
 }
 
@@ -450,7 +450,6 @@ enum ToolbarAction {
 	ACTION_FADE_UP,
 	ACTION_TOGGLE_KEYBOARD_BUTTON,
 	ACTION_TOGGLE_DOUBLE_TAP,
-	ACTION_TOGGLE_EDGE_PAN,
 	ACTION_TOGGLE_TAP_FEEDBACK,
 	ACTION_TOGGLE_CURSOR_MODE,
 	ACTION_TOGGLE_DPAD,
@@ -458,6 +457,7 @@ enum ToolbarAction {
 	ACTION_CYCLE_RENDER_SCALE,
 	ACTION_TOGGLE_HAPTICS,
 	ACTION_TOGGLE_AUTOSAVE,
+	ACTION_TOGGLE_EDGE_GUARD,
 	ACTION_CYCLE_CURSOR_SPEED
 };
 
@@ -487,7 +487,6 @@ const ToolbarButton SETTINGS_BUTTONS[] = {
 	{ "Fade +",   ACTION_FADE_UP, 0 },
 	{ "Keys",     ACTION_TOGGLE_KEYBOARD_BUTTON, 0 },
 	{ "2-Tap",    ACTION_TOGGLE_DOUBLE_TAP, 0 },
-	{ "Edge",     ACTION_TOGGLE_EDGE_PAN, 0 },
 	{ "Rings",    ACTION_TOGGLE_TAP_FEEDBACK, 0 },
 	{ "Cursor",   ACTION_TOGGLE_CURSOR_MODE, 0 },
 	{ "Speed",    ACTION_CYCLE_CURSOR_SPEED, 0 },
@@ -496,6 +495,7 @@ const ToolbarButton SETTINGS_BUTTONS[] = {
 	{ "Res",      ACTION_CYCLE_RENDER_SCALE, 0 },
 	{ "Haptics",  ACTION_TOGGLE_HAPTICS, 0 },
 	{ "Autosave", ACTION_TOGGLE_AUTOSAVE, 0 },
+	{ "Guard",    ACTION_TOGGLE_EDGE_GUARD, 0 },
 	{ "Back",     ACTION_CLOSE_SETTINGS, 0 },
 };
 
@@ -609,12 +609,12 @@ std::string buttonLabel(const ToolbarButton &button)
 	switch (button.action) {
 	case ACTION_TOGGLE_KEYBOARD_BUTTON: return onOff(button.label, s_settings.keyboardVisible);
 	case ACTION_TOGGLE_DOUBLE_TAP: return onOff(button.label, s_settings.doubleTapRightClick);
-	case ACTION_TOGGLE_EDGE_PAN: return onOff(button.label, s_settings.edgePan);
 	case ACTION_TOGGLE_TAP_FEEDBACK: return onOff(button.label, s_settings.tapFeedback);
 	case ACTION_TOGGLE_CURSOR_MODE: return onOff(button.label, s_settings.cursorMode);
 	case ACTION_TOGGLE_DPAD: return onOff(button.label, s_settings.dpadVisible);
 	case ACTION_TOGGLE_HAPTICS: return onOff(button.label, s_settings.haptics);
 	case ACTION_TOGGLE_AUTOSAVE: return onOff(button.label, s_settings.autosave);
+	case ACTION_TOGGLE_EDGE_GUARD: return onOff(button.label, s_settings.edgeGuard);
 	case ACTION_CYCLE_CURSOR_SPEED:
 		{
 			static const char *const SPEED_NAMES[4] = { "Low", "Medium", "High", "Extreme" };
@@ -707,10 +707,6 @@ void activateToolbarButton(const ToolbarButton &button, bool longPress)
 		s_settings.doubleTapRightClick = !s_settings.doubleTapRightClick;
 		saveSettings();
 		break;
-	case ACTION_TOGGLE_EDGE_PAN:
-		s_settings.edgePan = !s_settings.edgePan;
-		saveSettings();
-		break;
 	case ACTION_TOGGLE_TAP_FEEDBACK:
 		s_settings.tapFeedback = !s_settings.tapFeedback;
 		saveSettings();
@@ -738,6 +734,11 @@ void activateToolbarButton(const ToolbarButton &button, bool longPress)
 	case ACTION_TOGGLE_AUTOSAVE:
 		s_settings.autosave = !s_settings.autosave;
 		saveSettings();
+		break;
+	case ACTION_TOGGLE_EDGE_GUARD:
+		s_settings.edgeGuard = !s_settings.edgeGuard;
+		saveSettings();
+		TouchOverlay::applyEdgeGuard();
 		break;
 	case ACTION_CYCLE_CURSOR_SPEED:
 		s_settings.cursorSpeed = (s_settings.cursorSpeed + 1) % 4;
@@ -1734,12 +1735,6 @@ bool doubleTapRightClickEnabled(void)
 	return s_settings.doubleTapRightClick;
 }
 
-bool edgePanEnabled(void)
-{
-	ensureSettings();
-	return s_settings.edgePan;
-}
-
 float cursorSensitivity(void)
 {
 	ensureSettings();
@@ -1761,6 +1756,21 @@ float renderScale(void)
 		s_renderScaleAtLaunch = s_settings.renderScalePercent;
 	}
 	return (float)s_renderScaleAtLaunch / 100.0f;
+}
+
+void applyEdgeGuard(void)
+{
+	ensureSettings();
+	// GeneralsX @bugfix seastwood 30/09/2026 SDL defers iOS system gestures on every edge of a
+	// fullscreen window, so Control Center, Notification Center and the home swipe need a second
+	// swipe. While a finger rests near an edge, iOS then holds back every touch until it decides
+	// that finger is not a system swipe: a thumb resting on the edge while holding the phone
+	// delayed all touches by up to 13 s (measured with the input timeline). Off by default: the
+	// home indicator auto-hides and system swipes work on the first swipe. SDL applies the hint
+	// to the view controller immediately.
+	SDL_SetHint(SDL_HINT_IOS_HIDE_HOME_INDICATOR, s_settings.edgeGuard ? "2" : "1");
+	fprintf(stderr, "INFO: edge guard %s (iOS system swipes %s)\n", s_settings.edgeGuard ? "on" : "off",
+	        s_settings.edgeGuard ? "need a second swipe" : "work on the first swipe");
 }
 
 bool autosaveEnabled(void)

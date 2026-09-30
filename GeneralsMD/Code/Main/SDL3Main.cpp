@@ -482,6 +482,8 @@ int main(int argc, char* argv[])
 		// after a device reset (iPad). With the hint SDL creates the window landscape and the
 		// view controller only rotates between the two landscape orientations.
 		SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+		// Edge guard setting (off by default): see TouchOverlay::applyEdgeGuard.
+		TouchOverlay::applyEdgeGuard();
 		// GeneralsX @feature seastwood 29/09/2026 Return on the on-screen keyboard closes it (the
 		// Return key press still reaches the game). iPhone keyboards have no hide key, so without
 		// this the keyboard could only be closed by moving focus away from the entry field.
