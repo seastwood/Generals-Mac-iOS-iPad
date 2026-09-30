@@ -1543,8 +1543,11 @@ void inputHealthEvent(const SDL_Event &event)
 		if (now - h.lastLateLog >= 1000) {
 			h.lastLateLog = now;
 			if (event.type >= SDL_EVENT_FINGER_DOWN && event.type <= SDL_EVENT_FINGER_CANCELED) {
-				fprintf(stderr, "INFO: input: event 0x%x reached the game %u ms after it happened, at (%.2f, %.2f)\n",
-				        (unsigned)event.type, (unsigned)delayMs, event.tfinger.x, event.tfinger.y);
+				int fingersDown = 0;
+				SDL_Finger **fingers = SDL_GetTouchFingers(event.tfinger.touchID, &fingersDown);
+				SDL_free(fingers);
+				fprintf(stderr, "INFO: input: event 0x%x reached the game %u ms after it happened, at (%.2f, %.2f), %d finger(s) down\n",
+				        (unsigned)event.type, (unsigned)delayMs, event.tfinger.x, event.tfinger.y, fingersDown);
 			} else {
 				fprintf(stderr, "INFO: input: event 0x%x reached the game %u ms after it happened\n",
 				        (unsigned)event.type, (unsigned)delayMs);

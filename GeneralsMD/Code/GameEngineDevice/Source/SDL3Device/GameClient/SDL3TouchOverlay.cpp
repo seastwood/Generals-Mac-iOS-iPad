@@ -84,6 +84,7 @@ extern SDL_Window *TheSDL3Window;   // created in SDL3Main.cpp
 extern "C" void *objc_getClass(const char *name);
 extern "C" void *sel_registerName(const char *name);
 extern "C" void objc_msgSend(void);
+extern "C" const char *object_getClassName(void *object);
 
 namespace {
 
@@ -269,6 +270,54 @@ void playHaptic(Int style)
 		}
 	}
 	((void (*)(void *, void *))objc_msgSend)(s_generators[style], sel_registerName("impactOccurred"));
+}
+
+// GeneralsX @bugfix seastwood 30/09/2026 SDL 3.4 attaches a UIPinchGestureRecognizer to its view to
+// report SDL_EVENT_PINCH_*, which the game never reads (pinch zoom is done from the raw fingers).
+// Input hangs happen with several fingers on the screen, and a gesture recognizer is the one part
+// of UIKit touch delivery that can hold touches back, so it is removed. The recognizers left on
+// the view and its window are logged, in case another one is involved.
+void logGestureRecognizers(void *owner, const char *ownerName, bool removePinch)
+{
+	void *recognizers = ((void *(*)(void *, void *))objc_msgSend)(owner, sel_registerName("gestureRecognizers"));
+	if (recognizers == nullptr) {
+		fprintf(stderr, "INFO: touch view: %s has no gesture recognizers\n", ownerName);
+		return;
+	}
+	void *pinchClass = objc_getClass("UIPinchGestureRecognizer");
+	const unsigned long count = ((unsigned long (*)(void *, void *))objc_msgSend)(recognizers, sel_registerName("count"));
+	for (unsigned long i = 0; i < count; ++i) {
+		void *recognizer = ((void *(*)(void *, void *, unsigned long))objc_msgSend)(recognizers, sel_registerName("objectAtIndex:"), i);
+		const bool isPinch = pinchClass != nullptr &&
+			((bool (*)(void *, void *, void *))objc_msgSend)(recognizer, sel_registerName("isKindOfClass:"), pinchClass);
+		const bool remove = removePinch && isPinch;
+		fprintf(stderr, "INFO: touch view: %s gesture recognizer %s%s\n", ownerName, object_getClassName(recognizer),
+		        remove ? " (removed)" : "");
+		if (remove) {
+			((void (*)(void *, void *, void *))objc_msgSend)(owner, sel_registerName("removeGestureRecognizer:"), recognizer);
+		}
+	}
+}
+
+// Once, when the window exists.
+void configureTouchView()
+{
+	static bool s_done = false;
+	if (s_done || TheSDL3Window == nullptr) {
+		return;
+	}
+	s_done = true;
+	void *uiWindow = SDL_GetPointerProperty(SDL_GetWindowProperties(TheSDL3Window), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, nullptr);
+	if (uiWindow == nullptr) {
+		fprintf(stderr, "WARNING: touch view: no UIKit window\n");
+		return;
+	}
+	void *controller = ((void *(*)(void *, void *))objc_msgSend)(uiWindow, sel_registerName("rootViewController"));
+	void *view = controller != nullptr ? ((void *(*)(void *, void *))objc_msgSend)(controller, sel_registerName("view")) : nullptr;
+	if (view != nullptr) {
+		logGestureRecognizers(view, "view", true);
+	}
+	logGestureRecognizers(uiWindow, "window", false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,6 +1748,7 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 void update(void)
 {
 	ensureSettings();
+	configureTouchView();
 	++s_frame;
 	const Uint64 now = SDL_GetTicks();
 
