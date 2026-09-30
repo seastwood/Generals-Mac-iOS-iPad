@@ -33,7 +33,10 @@
 **   Settings page     button size, opacity, keyboard button on/off, double-tap right-click,
 **                     tap feedback rings, cursor (trackpad) mode, D-pad,
 **                     cursor speed, frame-rate limit, render resolution (next launch), haptics,
-**                     autosave, edge guard (iOS system swipes need a second swipe)
+**                     autosave, edge guard (iOS system swipes need a second swipe), gyro aiming
+**   Gyro button       with gyro aiming on and a cursor in use (cursor mode or a controller), a
+**                     round button: hold it to pause the gyro (re-center your grip); hold it
+**                     1 s, then slide, to move it
 **   Cursor            cursor mode draws its own arrow: iOS shows no system cursor on touch
 **   D-pad             optional thumb pad on the left edge, in a game: hold a direction to
 **                     scroll the camera (several fingers at once are fine)
@@ -104,6 +107,9 @@ struct OverlaySettings {
 	bool autosave = true;             // save a single-player game when leaving the app
 	Int cursorSpeed = 1;              // cursor sensitivity: 0 low, 1 medium, 2 high, 3 extreme
 	bool edgeGuard = false;           // defer iOS edge swipes; off: they delay touches (see applyEdgeGuard)
+	bool gyro = false;                // tilt the device to move the cursor
+	float gyroX = 0.07f;              // gyro button center, normalized
+	float gyroY = 0.22f;
 };
 
 OverlaySettings s_settings;
@@ -126,6 +132,8 @@ void clampSettings()
 {
 	s_settings.keyboardX = SDL_clamp(s_settings.keyboardX, 0.0f, 1.0f);
 	s_settings.keyboardY = SDL_clamp(s_settings.keyboardY, 0.0f, 1.0f);
+	s_settings.gyroX = SDL_clamp(s_settings.gyroX, 0.0f, 1.0f);
+	s_settings.gyroY = SDL_clamp(s_settings.gyroY, 0.0f, 1.0f);
 	s_settings.scale = SDL_clamp(s_settings.scale, SCALE_MIN, SCALE_MAX);
 	s_settings.opacity = SDL_clamp(s_settings.opacity, OPACITY_MIN, OPACITY_MAX);
 	if (s_settings.fpsLimit != 30 && s_settings.fpsLimit != 60 && s_settings.fpsLimit != 120) {
@@ -188,6 +196,9 @@ void loadSettings()
 		else if (name == "autosave") s_settings.autosave = value != 0.0f;
 		else if (name == "cursor_speed") s_settings.cursorSpeed = (Int)value;
 		else if (name == "edge_guard") s_settings.edgeGuard = value != 0.0f;
+		else if (name == "gyro") s_settings.gyro = value != 0.0f;
+		else if (name == "gyro_x") s_settings.gyroX = value;
+		else if (name == "gyro_y") s_settings.gyroY = value;
 	}
 	fclose(file);
 	clampSettings();
@@ -220,6 +231,9 @@ void saveSettings()
 	fprintf(file, "autosave=%d\n", s_settings.autosave ? 1 : 0);
 	fprintf(file, "cursor_speed=%d\n", (int)s_settings.cursorSpeed);
 	fprintf(file, "edge_guard=%d\n", s_settings.edgeGuard ? 1 : 0);
+	fprintf(file, "gyro=%d\n", s_settings.gyro ? 1 : 0);
+	fprintf(file, "gyro_x=%f\n", s_settings.gyroX);
+	fprintf(file, "gyro_y=%f\n", s_settings.gyroY);
 	fclose(file);
 }
 
@@ -458,6 +472,7 @@ enum ToolbarAction {
 	ACTION_TOGGLE_HAPTICS,
 	ACTION_TOGGLE_AUTOSAVE,
 	ACTION_TOGGLE_EDGE_GUARD,
+	ACTION_TOGGLE_GYRO,
 	ACTION_CYCLE_CURSOR_SPEED
 };
 
@@ -490,6 +505,7 @@ const ToolbarButton SETTINGS_BUTTONS[] = {
 	{ "Rings",    ACTION_TOGGLE_TAP_FEEDBACK, 0 },
 	{ "Cursor",   ACTION_TOGGLE_CURSOR_MODE, 0 },
 	{ "Speed",    ACTION_CYCLE_CURSOR_SPEED, 0 },
+	{ "Gyro",     ACTION_TOGGLE_GYRO, 0 },
 	{ "D-pad",    ACTION_TOGGLE_DPAD, 0 },
 	{ "FPS",      ACTION_CYCLE_FPS, 0 },
 	{ "Res",      ACTION_CYCLE_RENDER_SCALE, 0 },
@@ -615,6 +631,7 @@ std::string buttonLabel(const ToolbarButton &button)
 	case ACTION_TOGGLE_HAPTICS: return onOff(button.label, s_settings.haptics);
 	case ACTION_TOGGLE_AUTOSAVE: return onOff(button.label, s_settings.autosave);
 	case ACTION_TOGGLE_EDGE_GUARD: return onOff(button.label, s_settings.edgeGuard);
+	case ACTION_TOGGLE_GYRO: return onOff(button.label, s_settings.gyro);
 	case ACTION_CYCLE_CURSOR_SPEED:
 		{
 			static const char *const SPEED_NAMES[4] = { "Low", "Medium", "High", "Extreme" };
@@ -733,6 +750,10 @@ void activateToolbarButton(const ToolbarButton &button, bool longPress)
 		break;
 	case ACTION_TOGGLE_AUTOSAVE:
 		s_settings.autosave = !s_settings.autosave;
+		saveSettings();
+		break;
+	case ACTION_TOGGLE_GYRO:
+		s_settings.gyro = !s_settings.gyro;
 		saveSettings();
 		break;
 	case ACTION_TOGGLE_EDGE_GUARD:
@@ -1175,9 +1196,46 @@ bool keyboardButtonHit(float x, float y)
 }
 
 // ---------------------------------------------------------------------------
+// Gyro button: shown while gyro aiming moves a cursor; holding it pauses the gyro, like lifting a
+// mouse off the desk to re-center it. Same size as the keyboard button, but round.
+// ---------------------------------------------------------------------------
+bool s_gyroActive = false;          // the engine is moving the cursor with the gyro
+const Uint64 GYRO_BUTTON_DRAG_MS = 1000;   // hold this long, then slide, to move the button
+
+void clampGyroButton()
+{
+	float halfW = 0.0f, halfH = 0.0f;
+	if (!keyboardButtonHalfExtents(halfW, halfH)) {
+		return;
+	}
+	float screenW = 0.0f, screenH = 0.0f;
+	screenSize(screenW, screenH);
+	const Insets insets = safeAreaInsets(screenW, screenH);
+	const float minX = halfW + insets.left / screenW, maxX = 1.0f - halfW - insets.right / screenW;
+	const float minY = halfH + insets.top / screenH, maxY = 1.0f - halfH - insets.bottom / screenH;
+	s_settings.gyroX = SDL_clamp(s_settings.gyroX, minX, SDL_max(minX, maxX));
+	s_settings.gyroY = SDL_clamp(s_settings.gyroY, minY, SDL_max(minY, maxY));
+}
+
+bool gyroButtonHit(float x, float y)
+{
+	float halfW = 0.0f, halfH = 0.0f;
+	if (!s_gyroActive || !keyboardButtonHalfExtents(halfW, halfH)) {
+		return false;
+	}
+	// Round, hit-tested a little larger than drawn (in pixels, so the circle stays round).
+	float screenW = 0.0f, screenH = 0.0f;
+	screenSize(screenW, screenH);
+	const float radius = halfH * screenH * 1.2f;
+	const float dx = (x - s_settings.gyroX) * screenW;
+	const float dy = (y - s_settings.gyroY) * screenH;
+	return dx * dx + dy * dy <= radius * radius;
+}
+
+// ---------------------------------------------------------------------------
 // Press tracking (one overlay press at a time)
 // ---------------------------------------------------------------------------
-enum PressTarget { PRESS_NONE, PRESS_KEYBOARD_BUTTON, PRESS_TOOLBAR_TAB, PRESS_TOOLBAR_BUTTON };
+enum PressTarget { PRESS_NONE, PRESS_KEYBOARD_BUTTON, PRESS_GYRO_BUTTON, PRESS_TOOLBAR_TAB, PRESS_TOOLBAR_BUTTON };
 
 struct PressState {
 	PressTarget target = PRESS_NONE;
@@ -1396,9 +1454,67 @@ void drawKeyboardButton(float screenW, float screenH)
 	TheDisplay->drawFillRect(left + pad + keyW + gap, top + pad + 2 * (keyH + gap), 2 * keyW + gap, keyH, key);
 }
 
+void drawGyroButton(float screenW, float screenH)
+{
+	if (!s_gyroActive) {
+		return;
+	}
+	clampGyroButton();
+
+	const float side = screenH * KEYBOARD_BUTTON_SIZE_RATIO * s_settings.scale;
+	const float centerX = s_settings.gyroX * screenW;
+	const float centerY = s_settings.gyroY * screenH;
+	Rect rect;
+	rect.w = side;
+	rect.h = side;
+	rect.x = centerX - side * 0.5f;
+	rect.y = centerY - side * 0.5f;
+
+	// Held: the gyro is paused (orange); moving the button: yellow.
+	const bool holding = s_press.target == PRESS_GYRO_BUTTON;
+	ButtonStyle style;
+	style.back = overlayColor(28, 28, 30, 150);
+	style.border = overlayColor(255, 255, 255, 110);
+	style.strong = false;
+	Color icon = overlayColor(255, 255, 255, 190);
+	if (holding) {
+		style.back = s_press.dragging ? GameMakeColor(255, 204, 0, 240) : GameMakeColor(255, 149, 0, 235);
+		style.border = GameMakeColor(255, 255, 255, 255);
+		style.strong = true;
+		icon = GameMakeColor(0, 0, 0, 220);
+	}
+	drawShape(rect, side * 0.5f, style, SDL_max(1.5f, screenH / 600.0f), SDL_max(3.0f, screenH / 250.0f));
+
+	// Gyroscope glyph: a ring, a tilted orbit through it and a hub in the middle.
+	const float line = SDL_max(1.5f, screenH / 500.0f);
+	const float ringRadius = side * 0.30f;
+	const Int POINTS = 24;
+	float xs[POINTS], ys[POINTS];
+	for (Int i = 0; i < POINTS; ++i) {
+		const float angle = (float)i * 2.0f * SDL_PI_F / (float)POINTS;
+		xs[i] = centerX + SDL_cosf(angle) * ringRadius;
+		ys[i] = centerY + SDL_sinf(angle) * ringRadius;
+	}
+	strokePolygon(xs, ys, POINTS, icon, line);
+	const float tilt = -0.6f;   // radians
+	for (Int i = 0; i < POINTS; ++i) {
+		const float angle = (float)i * 2.0f * SDL_PI_F / (float)POINTS;
+		const float ex = SDL_cosf(angle) * ringRadius * 1.25f;
+		const float ey = SDL_sinf(angle) * ringRadius * 0.38f;
+		xs[i] = centerX + ex * SDL_cosf(tilt) - ey * SDL_sinf(tilt);
+		ys[i] = centerY + ex * SDL_sinf(tilt) + ey * SDL_cosf(tilt);
+	}
+	strokePolygon(xs, ys, POINTS, icon, line);
+	Rect hub;
+	hub.w = hub.h = side * 0.14f;
+	hub.x = centerX - hub.w * 0.5f;
+	hub.y = centerY - hub.h * 0.5f;
+	fillRoundedRect(hub, hub.w * 0.5f, icon);
+}
+
 void resetPress(const char *reason)
 {
-	if (s_press.target == PRESS_KEYBOARD_BUTTON && s_press.dragging) {
+	if ((s_press.target == PRESS_KEYBOARD_BUTTON || s_press.target == PRESS_GYRO_BUTTON) && s_press.dragging) {
 		saveSettings();
 	}
 	if (reason != nullptr) {
@@ -1436,6 +1552,11 @@ void pressTargetAt(float x, float y, float screenW, float screenH, PressState &p
 		if (press.target == PRESS_NONE && s_layout.tab.contains(px, py, screenH * 0.015f)) {
 			press.target = PRESS_TOOLBAR_TAB;
 		}
+	}
+	if (press.target == PRESS_NONE && gyroButtonHit(x, y)) {
+		press.target = PRESS_GYRO_BUTTON;
+		press.grabX = x - s_settings.gyroX;
+		press.grabY = y - s_settings.gyroY;
 	}
 	if (press.target == PRESS_NONE && keyboardButtonHit(x, y)) {
 		float centerX = 0.0f, centerY = 0.0f;
@@ -1520,6 +1641,10 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 			s_settings.keyboardX = x - s_press.grabX;
 			s_settings.keyboardY = y - s_press.grabY;
 			clampKeyboardButton();
+		} else if (s_press.target == PRESS_GYRO_BUTTON && s_press.dragging) {
+			s_settings.gyroX = x - s_press.grabX;
+			s_settings.gyroY = y - s_press.grabY;
+			clampGyroButton();
 		} else if (SDL_fabsf(x - s_press.downX) + SDL_fabsf(y - s_press.downY) > PRESS_SLOP) {
 			s_press.moved = true;
 		}
@@ -1597,6 +1722,11 @@ void update(void)
 	}
 
 	// Long-presses: a stationary finger emits no events, so they are polled here.
+	if (s_press.target == PRESS_GYRO_BUTTON && !s_press.moved && !s_press.dragging &&
+	    now - s_press.downTicks >= GYRO_BUTTON_DRAG_MS) {
+		s_press.dragging = true;
+		playHaptic(0);   // the button can be moved now
+	}
 	if (s_press.target == PRESS_KEYBOARD_BUTTON && !s_press.moved && !s_press.dragging &&
 	    now - s_press.downTicks >= KEYBOARD_BUTTON_DRAG_MS) {
 		s_press.dragging = true;
@@ -1647,6 +1777,7 @@ void draw(void)
 	}
 	drawDpad(screenW, screenH);
 	drawKeyboardButton(screenW, screenH);
+	drawGyroButton(screenW, screenH);
 	if (ownBatch) {
 		TheDisplay->endBatch();
 	} else {
@@ -1756,6 +1887,25 @@ float renderScale(void)
 		s_renderScaleAtLaunch = s_settings.renderScalePercent;
 	}
 	return (float)s_renderScaleAtLaunch / 100.0f;
+}
+
+bool gyroEnabled(void)
+{
+	ensureSettings();
+	return s_settings.gyro;
+}
+
+void setGyroActive(bool active)
+{
+	s_gyroActive = active;
+	if (!active && s_press.target == PRESS_GYRO_BUTTON) {
+		resetPress(nullptr);
+	}
+}
+
+bool gyroHeld(void)
+{
+	return s_press.target == PRESS_GYRO_BUTTON;
 }
 
 void applyEdgeGuard(void)

@@ -71,6 +71,16 @@ float cursorSensitivity(void);
 
 bool autosaveEnabled(void);
 
+/// Gyro aiming setting: tilting the device moves the cursor (cursor mode or a controller).
+bool gyroEnabled(void);
+
+/// Whether the engine is currently moving the cursor with the gyro; the overlay then shows the
+/// gyro button.
+void setGyroActive(bool active);
+
+/// True while the gyro button is held: the gyro is paused so the player can re-center their grip.
+bool gyroHeld(void);
+
 /// Apply the Guard setting: whether iOS system edge swipes are deferred (need a second swipe).
 /// Deferring them makes iOS hold back all touches while a finger rests near an edge, so it is off
 /// by default. Called at launch before the window exists, and again when the setting changes.

@@ -223,17 +223,17 @@ screen.
   - **Ctrl** / **Shift**: tap to hold the key for your next tap on the game
     (blue), long-press to lock it until you tap it again (orange). Ctrl+tap is
     force-attack, Shift+tap adds to a selection or queues waypoints.
-  - **Opts**: button size, transparency (**Fade**), the keyboard button on or
-    off, **2-Tap** (a quick second tap is a right click; off by default
-    because the first tap is still a left click), the tap
-    rings, **Cursor** mode, the **D-pad**, **FPS** (frame-rate limit: Game /
-    30 / 60 / 120; lower saves battery and heat), **Res** (render resolution
-    100% / 75% / 50%: lower makes the game's own UI and text bigger and runs
-    cooler, applies the next time the game starts), **Haptics**,
-    **Autosave** and **Guard** (off by default; when on, Control Center,
-    Notification Center and the home swipe need a second swipe, but iOS then
-    delays all touches while a finger rests near a screen edge). Settings are
-    saved in `Documents/touch-overlay.ini`.
+  - **Opts**: button size, transparency (**Fade**), the keyboard button on
+    or off, **2-Tap** (a quick second tap is a right click; off by default
+    because the first tap is still a left click), the tap rings, **Cursor**
+    mode, the **D-pad**, **FPS** (frame-rate limit: Game / 30 / 60 / 120;
+    lower saves battery and heat), **Res** (render resolution 100% / 75% /
+    50%: lower makes the game's own UI and text bigger and runs cooler,
+    applies the next time the game starts), **Haptics**, **Autosave**,
+    **Gyro** (see Gyro aiming below) and **Guard** (off by default; when on,
+    Control Center, Notification Center and the home swipe need a second
+    swipe, but iOS then delays all touches while a finger rests near a
+    screen edge). Settings are saved in `Documents/touch-overlay.ini`.
 - **Autosave**: when you leave the app during a campaign or skirmish game, it
   saves to **Autosave** (in the Load menu), because iOS may close a
   backgrounded game at any time.
@@ -245,13 +245,19 @@ screen.
   - Slide one finger to move the cursor; flick to send it gliding, and touch
     the screen to stop it. **Speed** in Opts sets how far it moves: Low,
     Medium (default), High or Extreme. It also sets the controller's
-    left-stick cursor speed.
+    right-stick cursor speed and the gyro speed.
   - **Tap**: left click at the cursor. **Two-finger tap**: right click.
   - **Touch and hold, then slide**: drag with the left button held (selection
     box); the cursor turns yellow while dragging.
   - **Two-finger slide**: scroll the map. **Pinch**: zoom.
   - Push the cursor against a screen edge to scroll the map, like on PC.
   - The overlay buttons (Hotkeys, keyboard, D-pad) are still tapped directly.
+- **Gyro aiming** (Opts → **Gyro: On**): with cursor mode or a controller,
+  turn and tilt the phone to move the cursor. Turn left or right, or roll it
+  like a steering wheel, to move it sideways; tilt the top edge toward you or
+  away to move it up or down. A round **gyro button** appears (left side by
+  default). Hold it to pause the gyro while you re-center the phone, then let
+  go. Hold it for a second, then slide, to move it.
 - **D-pad** (Opts → **D-pad: On**, in a game): a round thumb pad on the left.
   Hold a direction to scroll the map quickly (diagonals work, and further
   from the center is faster). It works together with a finger on the cursor.
@@ -271,8 +277,8 @@ game picks it up automatically, and a cursor appears when you use it.
 
 | Control | Action |
 |---|---|
-| Left stick | Move the cursor |
-| Right stick | Scroll the map |
+| Left stick | Scroll the map |
+| Right stick | Move the cursor |
 | **A** / Cross | Left click (hold and move: selection box) |
 | **B** / Circle | Right click |
 | **X** / Square | Select all units of the selected type on screen |
@@ -286,8 +292,8 @@ game picks it up automatically, and a cursor appears when you use it.
 | L3 (press left stick) | Jump to the latest radar event |
 | R3 (press right stick) | Stop |
 
-Use the right stick to scroll the map, or push the cursor against a screen
-edge. Touching the screen hides the controller cursor until you use the
+Use the left stick to scroll the map, or push the cursor against a screen
+edge. With **Gyro** on, the phone's gyro also moves the controller cursor. Touching the screen hides the controller cursor until you use the
 controller again.
 
 ---

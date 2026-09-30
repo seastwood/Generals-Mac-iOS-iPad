@@ -986,7 +986,7 @@ void resetTouchModes(SDL3Mouse *mouse, SDL_Window *window)
 // GeneralsX @feature seastwood 29/09/2026 MFi / Xbox / PlayStation controllers through SDL's
 // gamepad API. The controller drives the same cursor as cursor mode (it is shown while the
 // controller is in use, in either touch mode):
-//   left stick          cursor            right stick        scroll the camera
+//   right stick         cursor            left stick         scroll the camera
 //   A / Cross           left button (hold + move = selection box)
 //   B / Circle          right button
 //   X / Square          select all of the selected type on screen
@@ -1225,8 +1225,10 @@ void updateGamepad(SDL3Mouse *mouse, SDL_Window *window)
 	const float dt = s_pad.lastFrameTicks != 0 ? SDL_min(0.1f, (float)(now - s_pad.lastFrameTicks) / 1000.0f) : 0.0f;
 	s_pad.lastFrameTicks = now;
 
+	// GeneralsX @tweak seastwood 30/09/2026 Left stick scrolls the camera, right stick moves the
+	// cursor (the player's preference: aim with the right thumb, like a twin-stick game).
 	float moveX = 0.0f, moveY = 0.0f;
-	if (padStick(SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, moveX, moveY) && dt > 0.0f) {
+	if (padStick(SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, moveX, moveY) && dt > 0.0f) {
 		padShowCursor(mouse, window, winW, winH);
 		const float speed = PAD_CURSOR_SPEED * (float)winW * TouchOverlay::cursorSensitivity();
 		s_cursor.vx = 0.0f;   // the stick takes over from any cursor-mode glide
@@ -1238,7 +1240,7 @@ void updateGamepad(SDL3Mouse *mouse, SDL_Window *window)
 	}
 
 	float scrollX = 0.0f, scrollY = 0.0f;
-	if (padStick(SDL_GAMEPAD_AXIS_RIGHTX, SDL_GAMEPAD_AXIS_RIGHTY, scrollX, scrollY) && cameraControlAvailable()) {
+	if (padStick(SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, scrollX, scrollY) && cameraControlAvailable()) {
 		s_pad.active = true;
 		const Real fpsRatio = TheFramePacer != nullptr ? TheFramePacer->getBaseOverUpdateFpsRatio() : 1.0f;
 		const Real amount = PAD_SCROLL_SPEED * fpsRatio * TheGlobalData->m_keyboardScrollFactor;
@@ -1261,6 +1263,133 @@ void updateGamepad(SDL3Mouse *mouse, SDL_Window *window)
 		if (!s_cursorModeActive) {
 			scrollAtCursorEdge(winW, winH);   // cursor mode already does this in updateCursorMode
 		}
+		TouchOverlay::setCursorState(true, s_cursor.x / (float)winW, s_cursor.y / (float)winH, s_pad.leftHeld);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Gyro aiming
+//
+// GeneralsX @feature seastwood 30/09/2026 With the Gyro setting on and a cursor in use (cursor mode
+// or a controller), turning and tilting the device moves the cursor, like aiming a pointer. The
+// overlay's gyro button pauses it while held so the player can re-center their grip. The sensor
+// is the device's own gyroscope (SDL's CoreMotion sensor), opened only while needed.
+// ---------------------------------------------------------------------------
+struct GyroState {
+	SDL_Sensor *sensor = nullptr;
+	bool unavailable = false;   // no gyroscope found; not retried until the setting is toggled
+	Uint64 lastTicks = 0;
+};
+
+GyroState s_gyro;
+const float GYRO_GAIN = 1.6f;          // screen widths per radian at Speed High (Medium, x0.7: ~50 degrees per screen)
+const float GYRO_DEAD_ZONE = 0.03f;    // rad/s: hand tremor and sensor noise below this are ignored
+
+void gyroClose()
+{
+	if (s_gyro.sensor != nullptr) {
+		SDL_CloseSensor(s_gyro.sensor);
+		fprintf(stderr, "INFO: gyro aiming off\n");
+	}
+	s_gyro = GyroState();
+	TouchOverlay::setGyroActive(false);
+}
+
+bool gyroOpen()
+{
+	if (s_gyro.sensor != nullptr) {
+		return true;
+	}
+	if (s_gyro.unavailable) {
+		return false;
+	}
+	if (!SDL_WasInit(SDL_INIT_SENSOR) && !SDL_InitSubSystem(SDL_INIT_SENSOR)) {
+		fprintf(stderr, "WARNING: gyro aiming: sensors unavailable: %s\n", SDL_GetError());
+		s_gyro.unavailable = true;
+		return false;
+	}
+	int count = 0;
+	SDL_SensorID *sensors = SDL_GetSensors(&count);
+	for (int i = 0; sensors != nullptr && i < count && s_gyro.sensor == nullptr; ++i) {
+		if (SDL_GetSensorTypeForID(sensors[i]) == SDL_SENSOR_GYRO) {
+			s_gyro.sensor = SDL_OpenSensor(sensors[i]);
+		}
+	}
+	SDL_free(sensors);
+	if (s_gyro.sensor == nullptr) {
+		fprintf(stderr, "WARNING: gyro aiming: no gyroscope found\n");
+		s_gyro.unavailable = true;
+		return false;
+	}
+	fprintf(stderr, "INFO: gyro aiming on\n");
+	return true;
+}
+
+// Soft dead zone: rates below it are dropped, rates above it lose it (no jump at the threshold).
+float gyroDeadZone(float rate)
+{
+	if (rate > GYRO_DEAD_ZONE) {
+		return rate - GYRO_DEAD_ZONE;
+	}
+	if (rate < -GYRO_DEAD_ZONE) {
+		return rate + GYRO_DEAD_ZONE;
+	}
+	return 0.0f;
+}
+
+void updateGyro(SDL3Mouse *mouse, SDL_Window *window)
+{
+	const bool wanted = TouchOverlay::gyroEnabled() && (s_cursorModeActive || s_pad.pad != nullptr);
+	if (!wanted) {
+		if (s_gyro.sensor != nullptr || s_gyro.unavailable) {
+			gyroClose();
+		}
+		return;
+	}
+	if (!gyroOpen()) {
+		return;
+	}
+	TouchOverlay::setGyroActive(true);
+
+	int winW = 0, winH = 0;
+	SDL_GetWindowSize(window, &winW, &winH);
+	const Uint64 now = SDL_GetTicks();
+	const float dt = s_gyro.lastTicks != 0 ? SDL_min(0.1f, (float)(now - s_gyro.lastTicks) / 1000.0f) : 0.0f;
+	s_gyro.lastTicks = now;
+	float rate[3] = { 0.0f, 0.0f, 0.0f };
+	if (winW <= 0 || winH <= 0 || dt <= 0.0f || TouchOverlay::gyroHeld() ||
+	    !SDL_GetSensorData(s_gyro.sensor, rate, 3)) {
+		return;
+	}
+
+	// SDL reports rotation in the device's portrait frame (x right, y up, z toward the viewer,
+	// counter-clockwise positive) whatever the screen orientation. The game runs in landscape:
+	// with the right side up (LANDSCAPE) the screen's up axis is the device's +x and its right
+	// axis the device's -y; the other landscape flips both.
+	const SDL_DisplayOrientation orientation = SDL_GetCurrentDisplayOrientation(SDL_GetDisplayForWindow(window));
+	const float flip = orientation == SDL_ORIENTATION_LANDSCAPE_FLIPPED ? -1.0f : 1.0f;
+	const float aroundScreenUp = flip * rate[0];      // turning left is positive
+	const float aroundScreenRight = -flip * rate[1];  // tilting the top edge toward the player is positive
+	const float aroundScreenNormal = rate[2];         // rolling counter-clockwise is positive
+	// Turning right or rolling clockwise moves the cursor right; pointing the device up moves it up.
+	const float horizontal = -gyroDeadZone(aroundScreenUp + aroundScreenNormal);
+	const float vertical = -gyroDeadZone(aroundScreenRight);
+	if (horizontal == 0.0f && vertical == 0.0f) {
+		return;
+	}
+	const float gain = GYRO_GAIN * (float)winW * TouchOverlay::cursorSensitivity();
+	if (!s_cursorModeActive) {
+		padShowCursor(mouse, window, winW, winH);
+	}
+	s_cursor.vx = 0.0f;   // the gyro takes over from any cursor-mode glide
+	s_cursor.vy = 0.0f;
+	s_cursor.x += horizontal * gain * dt;
+	s_cursor.y += vertical * gain * dt;
+	cursorClamp(winW, winH);
+	sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+	if (s_cursorModeActive) {
+		cursorPublish(winW, winH);
+	} else {
 		TouchOverlay::setCursorState(true, s_cursor.x / (float)winW, s_cursor.y / (float)winH, s_pad.leftHeld);
 	}
 }
@@ -1862,6 +1991,7 @@ void SDL3GameEngine::pollSDL3Events(void)
 				updateTouchLongPress(touchMouse, m_SDLWindow);
 			}
 			updateGamepad(touchMouse, m_SDLWindow);
+			updateGyro(touchMouse, m_SDLWindow);
 		}
 	}
 #endif
