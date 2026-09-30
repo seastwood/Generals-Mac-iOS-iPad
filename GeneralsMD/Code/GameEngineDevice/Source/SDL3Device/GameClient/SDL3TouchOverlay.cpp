@@ -1312,6 +1312,15 @@ void drawToolbar(float screenW, float screenH, std::vector<PendingLabel> &labels
 	const ButtonStyle tabStyle = buttonStyle(TAB_INDEX, nullptr);
 	drawShape(s_layout.tab, s_layout.tab.h * 0.5f, tabStyle, thinLine, thickLine);
 	labels.push_back({ s_settings.toolbarOpen ? "Hide" : "Hotkeys", s_layout.tab, tabStyle.text });
+
+	// Build stamp under the settings, so it is easy to tell which build a device is running.
+	if (s_settingsPage && !s_layout.buttons.empty()) {
+		Rect stamp = s_layout.buttons.back();
+		stamp.y += stamp.h + screenH * 0.01f;
+		stamp.x = stamp.x + stamp.w - screenW * 0.3f;
+		stamp.w = screenW * 0.3f;
+		labels.push_back({ std::string("Build ") + __DATE__ + " " + __TIME__, stamp, overlayColor(255, 255, 255, 200) });
+	}
 }
 
 void drawKeyboardButton(float screenW, float screenH)
