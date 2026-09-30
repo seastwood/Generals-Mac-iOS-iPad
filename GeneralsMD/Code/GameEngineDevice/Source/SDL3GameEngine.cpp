@@ -1325,6 +1325,93 @@ bool touchGestureIdle()
 	return s_cursorModeActive ? cursorGestureIdle() : s_touch.phase == TouchState::IDLE;
 }
 
+// GeneralsX @tweak seastwood 30/09/2026 Input timeline for diagnosing input that stops for seconds
+// while the game keeps running (touches, the overlay and the controller alike). Every 10 s the log
+// gets one line: frames run, touch and controller events received, the longest frame, and the
+// longest delay between a touch or button happening and iOS handing it to the app (from the event
+// timestamp). A span where the player kept tapping but no events arrived, or events arrived late,
+// shows whether iOS withheld the input or the game ignored it.
+struct InputHealth {
+	Uint64 windowStart = 0;
+	Uint64 lastPoll = 0;
+	Uint32 frames = 0;
+	Uint32 touchEvents = 0;
+	Uint32 touchDowns = 0;
+	Uint32 padEvents = 0;
+	Uint64 longestFrameMs = 0;
+	Uint64 longestDelayMs = 0;
+	Uint64 lastLateLog = 0;
+};
+
+InputHealth s_inputHealth;
+const Uint64 INPUT_HEALTH_WINDOW_MS = 10000;
+const Uint64 INPUT_LATE_MS = 300;
+
+void inputHealthFrame()
+{
+	InputHealth &h = s_inputHealth;
+	const Uint64 now = SDL_GetTicks();
+	if (h.lastPoll != 0) {
+		const Uint64 gap = now - h.lastPoll;
+		if (gap >= 1000 && !iosShouldPauseRendering()) {
+			fprintf(stderr, "INFO: input: %u ms without reading input (the game was busy)\n", (unsigned)gap);
+		}
+		h.longestFrameMs = SDL_max(h.longestFrameMs, gap);
+	}
+	h.lastPoll = now;
+	++h.frames;
+	if (h.windowStart == 0) {
+		h.windowStart = now;
+	} else if (now - h.windowStart >= INPUT_HEALTH_WINDOW_MS) {
+		fprintf(stderr, "INFO: input health t=%us: %u frames, %u touch events (%u downs), %u controller events, "
+		        "longest frame %u ms, most delayed input %u ms\n",
+		        (unsigned)(now / 1000), (unsigned)h.frames, (unsigned)h.touchEvents, (unsigned)h.touchDowns,
+		        (unsigned)h.padEvents, (unsigned)h.longestFrameMs, (unsigned)h.longestDelayMs);
+		const Uint64 lastLateLog = h.lastLateLog;
+		h = InputHealth();
+		h.windowStart = now;
+		h.lastPoll = now;
+		h.lastLateLog = lastLateLog;
+	}
+}
+
+void inputHealthEvent(const SDL_Event &event)
+{
+	InputHealth &h = s_inputHealth;
+	switch (event.type) {
+		case SDL_EVENT_FINGER_DOWN:
+			++h.touchDowns;
+			++h.touchEvents;
+			break;
+		case SDL_EVENT_FINGER_MOTION:
+		case SDL_EVENT_FINGER_UP:
+		case SDL_EVENT_FINGER_CANCELED:
+			++h.touchEvents;
+			break;
+		case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+		case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+		case SDL_EVENT_GAMEPAD_BUTTON_UP:
+			++h.padEvents;
+			break;
+		default:
+			return;
+	}
+	const Uint64 nowNS = SDL_GetTicksNS();
+	if (event.common.timestamp == 0 || event.common.timestamp > nowNS) {
+		return;
+	}
+	const Uint64 delayMs = (nowNS - event.common.timestamp) / 1000000;
+	h.longestDelayMs = SDL_max(h.longestDelayMs, delayMs);
+	if (delayMs >= INPUT_LATE_MS && event.type != SDL_EVENT_FINGER_MOTION && event.type != SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+		const Uint64 now = SDL_GetTicks();
+		if (now - h.lastLateLog >= 1000) {
+			h.lastLateLog = now;
+			fprintf(stderr, "INFO: input: event 0x%x reached the game %u ms after it happened\n",
+			        (unsigned)event.type, (unsigned)delayMs);
+		}
+	}
+}
+
 // Free the gesture translator for a new touch if its current finger is resting; true when idle.
 bool touchGestureYield(SDL3Mouse *mouse, SDL_Window *window)
 {
@@ -1552,23 +1639,18 @@ void SDL3GameEngine::pollSDL3Events(void)
 	}
 
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-	// GeneralsX @tweak seastwood 30/09/2026 Log long gaps between input polls: touches are only
-	// read here, so a busy frame (loading, a save, a stall in the renderer) shows as an input hang.
-	{
-		static Uint64 s_lastPollTicks = 0;
-		const Uint64 pollTicks = SDL_GetTicks();
-		if (s_lastPollTicks != 0 && pollTicks - s_lastPollTicks >= 1000 && !iosShouldPauseRendering()) {
-			fprintf(stderr, "INFO: input: %u ms without reading input (the game was busy)\n",
-			        (unsigned)(pollTicks - s_lastPollTicks));
-		}
-		s_lastPollTicks = pollTicks;
-	}
+	// Touches are only read here, so a busy frame (loading, a save, a renderer stall) shows as an
+	// input hang; see InputHealth.
+	inputHealthFrame();
 #endif
 
 	updateTextInputState();
 
 	SDL_Event event;
 	while (SDL_PollEvent(&event)) {
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+		inputHealthEvent(event);
+#endif
 		switch (event.type) {
 			case SDL_EVENT_QUIT:
 				m_quitting = true;
