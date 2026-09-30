@@ -12,6 +12,7 @@
 #   5. Optional: install to the first connected device via devicectl.
 #
 # Usage: ./scripts/build/ios/package-ios-zh.sh [--dev] [--install]
+#   The engine is built first (set GX_SKIP_BUILD=1 to skip); a failed build stops packaging.
 #   Signing settings come from GX_* environment variables or ios/signing.env
 #   (see docs/HOWTO/IOS_INSTALL_FREE_ACCOUNT.md).
 #   --dev      skip bundling the 2.7 GB of game assets (code-only iteration)
@@ -61,6 +62,16 @@ BUNDLE_ID="${GX_BUNDLE_ID:-me.ammaar.generalszh}"
 
 GAME_BIN="${BUILD_DIR}/GeneralsMD/GeneralsXZH.app/GeneralsXZH"
 DXVK_BUILD="${BUILD_DIR}/_deps/dxvk-build-macos"
+
+# Bring the engine up to date first and stop if it does not build: packaging a stale binary after
+# a failed build silently installs the previous version. GX_SKIP_BUILD=1 skips this step.
+if [[ "${GX_SKIP_BUILD:-0}" != "1" && -d "${BUILD_DIR}" ]]; then
+    echo "==> Building the engine (cmake --build build/ios-vulkan --target z_generals)"
+    if ! cmake --build "${BUILD_DIR}" --target z_generals; then
+        echo "ERROR: the engine build failed; nothing was packaged or installed."
+        exit 1
+    fi
+fi
 
 if [[ ! -f "${GAME_BIN}" ]]; then
     echo "ERROR: engine binary not found at ${GAME_BIN} — build the ios-vulkan preset first."

@@ -69,12 +69,17 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
-#include <objc/message.h>
-#include <objc/runtime.h>
 #include <string>
 #include <vector>
 
 extern SDL_Window *TheSDL3Window;   // created in SDL3Main.cpp
+
+// Objective-C runtime entry points used for haptics, declared here with plain pointer types
+// instead of including <objc/runtime.h>: its BOOL typedef clashes with the Windows compatibility
+// headers the engine is built with. Class, SEL and id are all pointers at the ABI level.
+extern "C" void *objc_getClass(const char *name);
+extern "C" void *sel_registerName(const char *name);
+extern "C" void objc_msgSend(void);
 
 namespace {
 
@@ -230,21 +235,21 @@ void playHaptic(Int style)
 	if (!s_settings.haptics) {
 		return;
 	}
-	static id s_generators[3] = { nullptr, nullptr, nullptr };   // light, medium, heavy
+	static void *s_generators[3] = { nullptr, nullptr, nullptr };   // light, medium, heavy
 	style = SDL_clamp(style, 0, 2);
 	if (s_generators[style] == nullptr) {
-		Class generatorClass = objc_getClass("UIImpactFeedbackGenerator");
+		void *generatorClass = objc_getClass("UIImpactFeedbackGenerator");
 		if (generatorClass == nullptr) {
 			return;
 		}
-		id allocated = ((id (*)(Class, SEL))objc_msgSend)(generatorClass, sel_registerName("alloc"));
+		void *allocated = ((void *(*)(void *, void *))objc_msgSend)(generatorClass, sel_registerName("alloc"));
 		// UIImpactFeedbackStyleLight = 0, Medium = 1, Heavy = 2
-		s_generators[style] = ((id (*)(id, SEL, long))objc_msgSend)(allocated, sel_registerName("initWithStyle:"), (long)style);
+		s_generators[style] = ((void *(*)(void *, void *, long))objc_msgSend)(allocated, sel_registerName("initWithStyle:"), (long)style);
 		if (s_generators[style] == nullptr) {
 			return;
 		}
 	}
-	((void (*)(id, SEL))objc_msgSend)(s_generators[style], sel_registerName("impactOccurred"));
+	((void (*)(void *, void *))objc_msgSend)(s_generators[style], sel_registerName("impactOccurred"));
 }
 
 // ---------------------------------------------------------------------------
