@@ -32,7 +32,8 @@
 **                     next tap on the game, long-press = locked until tapped again.
 **   Settings page     button size, opacity, keyboard button on/off, double-tap right-click,
 **                     edge scrolling, tap feedback rings, cursor (trackpad) mode, D-pad,
-**                     frame-rate limit, render resolution (next launch), haptics, autosave
+**                     cursor speed, frame-rate limit, render resolution (next launch), haptics,
+**                     autosave
 **   Cursor            cursor mode draws its own arrow: iOS shows no system cursor on touch
 **   D-pad             optional thumb pad on the left edge, in a game: hold a direction to
 **                     scroll the camera (several fingers at once are fine)
@@ -102,6 +103,7 @@ struct OverlaySettings {
 	Int renderScalePercent = 100;     // internal resolution, 100 / 75 / 50; applied at launch
 	bool haptics = true;
 	bool autosave = true;             // save a single-player game when leaving the app
+	Int cursorSpeed = 1;              // cursor sensitivity: 0 low, 1 medium, 2 high, 3 extreme
 };
 
 OverlaySettings s_settings;
@@ -132,6 +134,7 @@ void clampSettings()
 	if (s_settings.renderScalePercent != 75 && s_settings.renderScalePercent != 50) {
 		s_settings.renderScalePercent = 100;
 	}
+	s_settings.cursorSpeed = SDL_clamp(s_settings.cursorSpeed, 0, 3);
 }
 
 void loadSettings()
@@ -184,6 +187,7 @@ void loadSettings()
 		else if (name == "render_scale") s_settings.renderScalePercent = (Int)value;
 		else if (name == "haptics") s_settings.haptics = value != 0.0f;
 		else if (name == "autosave") s_settings.autosave = value != 0.0f;
+		else if (name == "cursor_speed") s_settings.cursorSpeed = (Int)value;
 	}
 	fclose(file);
 	clampSettings();
@@ -215,6 +219,7 @@ void saveSettings()
 	fprintf(file, "render_scale=%d\n", (int)s_settings.renderScalePercent);
 	fprintf(file, "haptics=%d\n", s_settings.haptics ? 1 : 0);
 	fprintf(file, "autosave=%d\n", s_settings.autosave ? 1 : 0);
+	fprintf(file, "cursor_speed=%d\n", (int)s_settings.cursorSpeed);
 	fclose(file);
 }
 
@@ -452,7 +457,8 @@ enum ToolbarAction {
 	ACTION_CYCLE_FPS,
 	ACTION_CYCLE_RENDER_SCALE,
 	ACTION_TOGGLE_HAPTICS,
-	ACTION_TOGGLE_AUTOSAVE
+	ACTION_TOGGLE_AUTOSAVE,
+	ACTION_CYCLE_CURSOR_SPEED
 };
 
 struct ToolbarButton {
@@ -484,6 +490,7 @@ const ToolbarButton SETTINGS_BUTTONS[] = {
 	{ "Edge",     ACTION_TOGGLE_EDGE_PAN, 0 },
 	{ "Rings",    ACTION_TOGGLE_TAP_FEEDBACK, 0 },
 	{ "Cursor",   ACTION_TOGGLE_CURSOR_MODE, 0 },
+	{ "Speed",    ACTION_CYCLE_CURSOR_SPEED, 0 },
 	{ "D-pad",    ACTION_TOGGLE_DPAD, 0 },
 	{ "FPS",      ACTION_CYCLE_FPS, 0 },
 	{ "Res",      ACTION_CYCLE_RENDER_SCALE, 0 },
@@ -608,6 +615,11 @@ std::string buttonLabel(const ToolbarButton &button)
 	case ACTION_TOGGLE_DPAD: return onOff(button.label, s_settings.dpadVisible);
 	case ACTION_TOGGLE_HAPTICS: return onOff(button.label, s_settings.haptics);
 	case ACTION_TOGGLE_AUTOSAVE: return onOff(button.label, s_settings.autosave);
+	case ACTION_CYCLE_CURSOR_SPEED:
+		{
+			static const char *const SPEED_NAMES[4] = { "Low", "Medium", "High", "Extreme" };
+			return std::string("Speed: ") + SPEED_NAMES[SDL_clamp(s_settings.cursorSpeed, 0, 3)];
+		}
 	case ACTION_CYCLE_FPS:
 		return s_settings.fpsLimit == 0 ? std::string("FPS: Game") : std::string("FPS: ") + std::to_string(s_settings.fpsLimit);
 	case ACTION_CYCLE_RENDER_SCALE:
@@ -725,6 +737,10 @@ void activateToolbarButton(const ToolbarButton &button, bool longPress)
 		break;
 	case ACTION_TOGGLE_AUTOSAVE:
 		s_settings.autosave = !s_settings.autosave;
+		saveSettings();
+		break;
+	case ACTION_CYCLE_CURSOR_SPEED:
+		s_settings.cursorSpeed = (s_settings.cursorSpeed + 1) % 4;
 		saveSettings();
 		break;
 	}
@@ -1697,6 +1713,14 @@ bool edgePanEnabled(void)
 {
 	ensureSettings();
 	return s_settings.edgePan;
+}
+
+float cursorSensitivity(void)
+{
+	ensureSettings();
+	// High is the original tuning; the default is Medium.
+	static const float MULTIPLIERS[4] = { 0.45f, 0.7f, 1.0f, 1.5f };
+	return MULTIPLIERS[SDL_clamp(s_settings.cursorSpeed, 0, 3)];
 }
 
 bool cursorModeEnabled(void)

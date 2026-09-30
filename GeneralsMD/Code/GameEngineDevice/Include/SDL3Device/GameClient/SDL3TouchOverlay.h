@@ -61,6 +61,10 @@ bool doubleTapRightClickEnabled(void);
 bool edgePanEnabled(void);
 bool cursorModeEnabled(void);
 
+/// Cursor sensitivity multiplier from the Speed setting (Low 0.45, Medium 0.7, High 1.0,
+/// Extreme 1.5), for cursor-mode finger movement and the controller's left stick.
+float cursorSensitivity(void);
+
 bool autosaveEnabled(void);
 
 /// Internal render resolution as a fraction of the screen (1.0, 0.75 or 0.5). The first call

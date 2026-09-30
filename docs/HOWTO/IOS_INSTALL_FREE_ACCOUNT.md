@@ -242,7 +242,9 @@ screen.
 - **Cursor mode** (Opts → **Cursor: On**): the screen works like a laptop
   trackpad with an on-screen arrow instead of tapping things directly.
   - Slide one finger to move the cursor; flick to send it gliding, and touch
-    the screen to stop it.
+    the screen to stop it. **Speed** in Opts sets how far it moves: Low,
+    Medium (default), High or Extreme. It also sets the controller's
+    left-stick cursor speed.
   - **Tap**: left click at the cursor. **Two-finger tap**: right click.
   - **Touch and hold, then slide**: drag with the left button held (selection
     box); the cursor turns yellow while dragging.

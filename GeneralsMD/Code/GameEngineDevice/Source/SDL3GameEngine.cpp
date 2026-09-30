@@ -675,7 +675,8 @@ bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Even
 			const float dt = SDL_max(0.001f, (float)(now - s_cursor.lastMoveTicks) / 1000.0f);
 			s_cursor.lastMoveTicks = now;
 			const float fingerSpeed = SDL_sqrtf(dx * dx + dy * dy) / dt;
-			const float gain = SDL_min(CURSOR_MAX_GAIN, CURSOR_GAIN * (1.0f + fingerSpeed / CURSOR_ACCEL_SPEED));
+			const float gain = SDL_min(CURSOR_MAX_GAIN, CURSOR_GAIN * (1.0f + fingerSpeed / CURSOR_ACCEL_SPEED)) *
+				TouchOverlay::cursorSensitivity();
 			s_cursor.x += dx * gain;
 			s_cursor.y += dy * gain;
 			// Smoothed velocity for the glide after release.
@@ -1129,7 +1130,7 @@ void updateGamepad(SDL3Mouse *mouse, SDL_Window *window)
 	float moveX = 0.0f, moveY = 0.0f;
 	if (padStick(SDL_GAMEPAD_AXIS_LEFTX, SDL_GAMEPAD_AXIS_LEFTY, moveX, moveY) && dt > 0.0f) {
 		padShowCursor(mouse, window, winW, winH);
-		const float speed = PAD_CURSOR_SPEED * (float)winW;
+		const float speed = PAD_CURSOR_SPEED * (float)winW * TouchOverlay::cursorSensitivity();
 		s_cursor.vx = 0.0f;   // the stick takes over from any cursor-mode glide
 		s_cursor.vy = 0.0f;
 		s_cursor.x += moveX * speed * dt;
