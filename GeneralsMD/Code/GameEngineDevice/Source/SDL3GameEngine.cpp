@@ -533,6 +533,7 @@ void updateTouchLongPress(SDL3Mouse *mouse, SDL_Window *window)
 //   1 finger hold, then slide -> left-button drag at the cursor (selection box, drag)
 //   2 finger tap              -> right click at the cursor
 //   2 finger slide            -> scroll the camera; pinch -> zoom
+//   cursor at a screen edge   -> scroll the camera, like pushing the mouse against it on PC
 // Positions are window points, like the gesture translator above.
 // ---------------------------------------------------------------------------
 struct CursorState {
@@ -579,6 +580,8 @@ const float CURSOR_MIN_DT = 1.0f / 240.0f;    // shortest interval used to measu
 // offset through the view plane independently of resolution; this keeps the map roughly under
 // the fingers at the default camera height.
 const float CURSOR_PAN_GAIN = 2.5f;
+const float CURSOR_EDGE = 0.01f;              // normalized edge band that scrolls the camera
+const float CURSOR_EDGE_SCROLL_SPEED = 200.0f; // matches the game's keyboard scroll amount
 const Uint64 CURSOR_RESTING_MS = 1000;        // a cursor finger that stayed put this long is resting
 
 bool cursorGestureIdle()
@@ -636,6 +639,29 @@ void cursorPanCamera(float dx, float dy, int winW, int winH)
 	Coord2D offset;
 	offset.x = -dx * pixelsPerPointX * CURSOR_PAN_GAIN;
 	offset.y = -dy * pixelsPerPointY * CURSOR_PAN_GAIN;
+	TheTacticalView->userScrollBy(&offset);
+}
+
+// Cursor resting against a screen edge scrolls the camera that way, like the mouse on PC (cursor
+// mode and the controller). The game's own screen-edge scroll is off on iOS (SDL3Mouse never
+// captures there), because a direct tap near an edge would leave it scrolling.
+void scrollAtCursorEdge(int winW, int winH)
+{
+	if (!cameraControlAvailable() || winW <= 0 || winH <= 0) {
+		return;
+	}
+	const float nx = s_cursor.x / (float)winW;
+	const float ny = s_cursor.y / (float)winH;
+	const float dirX = nx <= CURSOR_EDGE ? -1.0f : (nx >= 1.0f - CURSOR_EDGE ? 1.0f : 0.0f);
+	const float dirY = ny <= CURSOR_EDGE ? -1.0f : (ny >= 1.0f - CURSOR_EDGE ? 1.0f : 0.0f);
+	if (dirX == 0.0f && dirY == 0.0f) {
+		return;
+	}
+	const Real fpsRatio = TheFramePacer != nullptr ? TheFramePacer->getBaseOverUpdateFpsRatio() : 1.0f;
+	const Real amount = CURSOR_EDGE_SCROLL_SPEED * fpsRatio * TheGlobalData->m_keyboardScrollFactor;
+	Coord2D offset;
+	offset.x = dirX * TheGlobalData->m_horizontalScrollSpeedFactor * amount;
+	offset.y = dirY * TheGlobalData->m_verticalScrollSpeedFactor * amount;
 	TheTacticalView->userScrollBy(&offset);
 }
 
@@ -870,7 +896,7 @@ bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Even
 	return leftClicked;
 }
 
-// Per frame: lost-lift recovery, hold-to-drag and inertia.
+// Per frame: lost-lift recovery, hold-to-drag, inertia and edge scrolling.
 void updateCursorMode(SDL3Mouse *mouse, SDL_Window *window)
 {
 	int winW = 0, winH = 0;
@@ -925,6 +951,10 @@ void updateCursorMode(SDL3Mouse *mouse, SDL_Window *window)
 		}
 		cursorClamp(winW, winH);
 		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+	}
+
+	if (s_cursor.phase != CursorState::TWO) {
+		scrollAtCursorEdge(winW, winH);
 	}
 
 	cursorPublish(winW, winH);
@@ -1228,6 +1258,9 @@ void updateGamepad(SDL3Mouse *mouse, SDL_Window *window)
 	}
 
 	if (s_pad.active) {
+		if (!s_cursorModeActive) {
+			scrollAtCursorEdge(winW, winH);   // cursor mode already does this in updateCursorMode
+		}
 		TouchOverlay::setCursorState(true, s_cursor.x / (float)winW, s_cursor.y / (float)winH, s_pad.leftHeld);
 	}
 }
@@ -1263,6 +1296,52 @@ struct InputHealth {
 	Uint64 longestDelayMs = 0;
 	Uint64 lastLateLog = 0;
 };
+
+// Fingers currently down, to report long holds and where they were (a hand resting on the glass).
+struct HeldFinger {
+	SDL_FingerID id = 0;
+	Uint64 downNS = 0;
+	float x = 0.0f, y = 0.0f;
+	bool used = false;
+};
+HeldFinger s_heldFingers[10];
+const Uint64 LONG_HOLD_MS = 3000;
+
+void heldFingerDown(const SDL_Event &event, Uint64 eventNS)
+{
+	HeldFinger *slot = nullptr;
+	for (HeldFinger &finger : s_heldFingers) {
+		if (finger.used && finger.id == event.tfinger.fingerID) {
+			slot = &finger;   // reused id: the old lift was lost
+			break;
+		}
+		if (!finger.used && slot == nullptr) {
+			slot = &finger;
+		}
+	}
+	if (slot != nullptr) {
+		slot->used = true;
+		slot->id = event.tfinger.fingerID;
+		slot->downNS = eventNS;
+		slot->x = event.tfinger.x;
+		slot->y = event.tfinger.y;
+	}
+}
+
+void heldFingerUp(const SDL_Event &event, Uint64 eventNS)
+{
+	for (HeldFinger &finger : s_heldFingers) {
+		if (finger.used && finger.id == event.tfinger.fingerID) {
+			finger.used = false;
+			const Uint64 heldMs = eventNS > finger.downNS ? (eventNS - finger.downNS) / 1000000 : 0;
+			if (heldMs >= LONG_HOLD_MS) {
+				fprintf(stderr, "INFO: touch: a finger was held %u ms at (%.2f, %.2f)%s\n", (unsigned)heldMs,
+				        finger.x, finger.y, event.type == SDL_EVENT_FINGER_CANCELED ? ", canceled by iOS" : "");
+			}
+			return;
+		}
+	}
+}
 
 InputHealth s_inputHealth;
 const Uint64 INPUT_HEALTH_WINDOW_MS = 10000;
@@ -1318,17 +1397,29 @@ void inputHealthEvent(const SDL_Event &event)
 			return;
 	}
 	const Uint64 nowNS = SDL_GetTicksNS();
-	if (event.common.timestamp == 0 || event.common.timestamp > nowNS) {
+	const bool timed = event.common.timestamp != 0 && event.common.timestamp <= nowNS;
+	const Uint64 eventNS = timed ? event.common.timestamp : nowNS;
+	if (event.type == SDL_EVENT_FINGER_DOWN) {
+		heldFingerDown(event, eventNS);
+	} else if (event.type == SDL_EVENT_FINGER_UP || event.type == SDL_EVENT_FINGER_CANCELED) {
+		heldFingerUp(event, eventNS);
+	}
+	if (!timed) {
 		return;
 	}
-	const Uint64 delayMs = (nowNS - event.common.timestamp) / 1000000;
+	const Uint64 delayMs = (nowNS - eventNS) / 1000000;
 	h.longestDelayMs = SDL_max(h.longestDelayMs, delayMs);
 	if (delayMs >= INPUT_LATE_MS && event.type != SDL_EVENT_FINGER_MOTION && event.type != SDL_EVENT_GAMEPAD_AXIS_MOTION) {
 		const Uint64 now = SDL_GetTicks();
 		if (now - h.lastLateLog >= 1000) {
 			h.lastLateLog = now;
-			fprintf(stderr, "INFO: input: event 0x%x reached the game %u ms after it happened\n",
-			        (unsigned)event.type, (unsigned)delayMs);
+			if (event.type >= SDL_EVENT_FINGER_DOWN && event.type <= SDL_EVENT_FINGER_CANCELED) {
+				fprintf(stderr, "INFO: input: event 0x%x reached the game %u ms after it happened, at (%.2f, %.2f)\n",
+				        (unsigned)event.type, (unsigned)delayMs, event.tfinger.x, event.tfinger.y);
+			} else {
+				fprintf(stderr, "INFO: input: event 0x%x reached the game %u ms after it happened\n",
+				        (unsigned)event.type, (unsigned)delayMs);
+			}
 		}
 	}
 }

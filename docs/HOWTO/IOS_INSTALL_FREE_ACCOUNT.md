@@ -250,6 +250,7 @@ screen.
   - **Touch and hold, then slide**: drag with the left button held (selection
     box); the cursor turns yellow while dragging.
   - **Two-finger slide**: scroll the map. **Pinch**: zoom.
+  - Push the cursor against a screen edge to scroll the map, like on PC.
   - The overlay buttons (Hotkeys, keyboard, D-pad) are still tapped directly.
 - **D-pad** (Opts → **D-pad: On**, in a game): a round thumb pad on the left.
   Hold a direction to scroll the map quickly (diagonals work, and further
@@ -285,7 +286,8 @@ game picks it up automatically, and a cursor appears when you use it.
 | L3 (press left stick) | Jump to the latest radar event |
 | R3 (press right stick) | Stop |
 
-Use the right stick to scroll the map. Touching the screen hides the
+Use the right stick to scroll the map, or push the cursor against a screen
+edge. Touching the screen hides the
 controller cursor until you use the controller again.
 
 ---
