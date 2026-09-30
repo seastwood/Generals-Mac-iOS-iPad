@@ -1406,6 +1406,45 @@ void resetPress(const char *reason)
 	s_press = PressState();
 }
 
+// Which overlay control a touch at normalized (x, y) lands on, filled into press (target, index,
+// keyboard grab offset). The D-pad is not included: it tracks its own finger.
+void pressTargetAt(float x, float y, float screenW, float screenH, PressState &press)
+{
+	const float px = x * screenW;
+	const float py = y * screenH;
+	if (toolbarAvailable() && s_layout.valid) {
+		const float margin = screenH * 0.006f;
+		for (size_t i = 0; i < s_layout.buttons.size(); ++i) {
+			if (s_layout.buttons[i].contains(px, py, margin)) {
+				press.target = PRESS_TOOLBAR_BUTTON;
+				press.index = (Int)i;
+				break;
+			}
+		}
+		for (size_t i = 0; press.target == PRESS_NONE && i < s_layout.column.size(); ++i) {
+			// Circles: hit-test the round shape, a little larger than drawn.
+			const Rect &rect = s_layout.column[i];
+			const float dx = px - (rect.x + rect.w * 0.5f);
+			const float dy = py - (rect.y + rect.h * 0.5f);
+			const float radius = rect.w * 0.5f + margin;
+			if (dx * dx + dy * dy <= radius * radius) {
+				press.target = PRESS_TOOLBAR_BUTTON;
+				press.index = COLUMN_BASE + (Int)i;
+			}
+		}
+		if (press.target == PRESS_NONE && s_layout.tab.contains(px, py, screenH * 0.015f)) {
+			press.target = PRESS_TOOLBAR_TAB;
+		}
+	}
+	if (press.target == PRESS_NONE && keyboardButtonHit(x, y)) {
+		float centerX = 0.0f, centerY = 0.0f;
+		keyboardButtonCenter(centerX, centerY);
+		press.target = PRESS_KEYBOARD_BUTTON;
+		press.grabX = x - centerX;
+		press.grabY = y - centerY;
+	}
+}
+
 } // anonymous namespace
 
 namespace TouchOverlay {
@@ -1450,7 +1489,7 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 	switch (event.type) {
 	case SDL_EVENT_FINGER_DOWN:
 		{
-			if (s_press.target != PRESS_NONE || !gestureIdle) {
+			if (!gestureIdle) {
 				return false;
 			}
 			PressState press;
@@ -1459,40 +1498,14 @@ bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKey
 			press.downTicks = SDL_GetTicks();
 			press.downX = x;
 			press.downY = y;
-
-			if (toolbarAvailable() && s_layout.valid) {
-				const float margin = screenH * 0.006f;
-				for (size_t i = 0; i < s_layout.buttons.size(); ++i) {
-					if (s_layout.buttons[i].contains(px, py, margin)) {
-						press.target = PRESS_TOOLBAR_BUTTON;
-						press.index = (Int)i;
-						break;
-					}
-				}
-				for (size_t i = 0; press.target == PRESS_NONE && i < s_layout.column.size(); ++i) {
-					// Circles: hit-test the round shape, a little larger than drawn.
-					const Rect &rect = s_layout.column[i];
-					const float dx = px - (rect.x + rect.w * 0.5f);
-					const float dy = py - (rect.y + rect.h * 0.5f);
-					const float radius = rect.w * 0.5f + margin;
-					if (dx * dx + dy * dy <= radius * radius) {
-						press.target = PRESS_TOOLBAR_BUTTON;
-						press.index = COLUMN_BASE + (Int)i;
-					}
-				}
-				if (press.target == PRESS_NONE && s_layout.tab.contains(px, py, screenH * 0.015f)) {
-					press.target = PRESS_TOOLBAR_TAB;
-				}
-			}
-			if (press.target == PRESS_NONE && keyboardButtonHit(x, y)) {
-				float centerX = 0.0f, centerY = 0.0f;
-				keyboardButtonCenter(centerX, centerY);
-				press.target = PRESS_KEYBOARD_BUTTON;
-				press.grabX = x - centerX;
-				press.grabY = y - centerY;
-			}
+			pressTargetAt(x, y, screenW, screenH, press);
 			if (press.target == PRESS_NONE) {
 				return false;
+			}
+			// GeneralsX @bugfix seastwood 30/09/2026 A new press on a control replaces one whose finger
+			// rests on another control: before, the resting press blocked every other control.
+			if (s_press.target != PRESS_NONE) {
+				resetPress("another control was pressed");
 			}
 			s_press = press;
 			return true;
@@ -1683,6 +1696,18 @@ void addTapFeedback(float x, float y, bool rightClick)
 	ring.start = SDL_GetTicks();
 	ring.right = rightClick;
 	ring.active = true;
+}
+
+bool controlAt(const SDL_Event &event)
+{
+	ensureSettings();
+	float screenW = 0.0f, screenH = 0.0f;
+	if (event.type != SDL_EVENT_FINGER_DOWN || !screenSize(screenW, screenH)) {
+		return false;
+	}
+	PressState press;
+	pressTargetAt(event.tfinger.x, event.tfinger.y, screenW, screenH, press);
+	return press.target != PRESS_NONE;
 }
 
 bool fingerIsDown(SDL_TouchID touchID, SDL_FingerID fingerID)

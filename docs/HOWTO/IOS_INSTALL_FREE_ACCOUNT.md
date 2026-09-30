@@ -335,6 +335,7 @@ cmake --build build/ios-vulkan --target z_generals
 | `Apple Development: ambiguous` | Duplicate certificates in the keychain. The script now picks the right one automatically; you can also delete the duplicate in **Keychain Access → login → My Certificates**. |
 | `The specified device was not found` | Set `GX_DEVICE_ID` in `ios/signing.env` (setup step 6.3). |
 | App shows a black screen and closes at once | That is the empty placeholder from pressing Run in Xcode. Delete it and run the package command. |
+| Touches are ignored for a few seconds | A thumb or palm resting on the screen edge counts as a touch. Newer builds let a new touch take over from it; if it still happens, pull the log and look for `input:`, `touch:` and `app inactive` lines around that time. |
 | App crashes or misbehaves | Pull the game's log (below) and look at the last lines. |
 
 To pull the game's log from the device after a session (use your own bundle

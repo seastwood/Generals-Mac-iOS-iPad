@@ -131,6 +131,9 @@ static void iosAutosaveOnBackground()
 
 static bool SDLCALL iosLifecycleWatcher(void *userdata, SDL_Event *event)
 {
+	// GeneralsX @tweak seastwood 30/09/2026 Log inactive periods: the game is paused while iOS has
+	// focus (Control Center, Notification Center, app switcher), which looks like an input hang.
+	static Uint64 s_inactiveSince = 0;
 	switch (event->type) {
 		case SDL_EVENT_WILL_ENTER_BACKGROUND:
 			iosAutosaveOnBackground();
@@ -147,9 +150,16 @@ static bool SDLCALL iosLifecycleWatcher(void *userdata, SDL_Event *event)
 		// Stay paused until fully active again (focus regained), which arrives
 		// after DID_ENTER_FOREGROUND.
 		case SDL_EVENT_WINDOW_FOCUS_LOST:
+			if (!s_appInactive.load()) {
+				s_inactiveSince = SDL_GetTicks();
+				fprintf(stderr, "INFO: app inactive (iOS took focus), game paused\n");
+			}
 			s_appInactive.store(true);
 			break;
 		case SDL_EVENT_WINDOW_FOCUS_GAINED:
+			if (s_appInactive.load()) {
+				fprintf(stderr, "INFO: app active again after %u ms\n", (unsigned)(SDL_GetTicks() - s_inactiveSince));
+			}
 			s_appInactive.store(false);
 			break;
 		default:
@@ -195,6 +205,8 @@ struct TouchState {
 	float f1x = 0.0f, f1y = 0.0f, f2x = 0.0f, f2y = 0.0f; // normalized per finger
 	Uint64 lastTapTicks = 0;              // previous clean tap, for double-tap right-click
 	float lastTapX = 0.0f, lastTapY = 0.0f;
+	float stillX = 0.0f, stillY = 0.0f;   // finger1 position when it last moved noticeably
+	Uint64 stillSince = 0;
 };
 
 TouchState s_touch;
@@ -209,6 +221,10 @@ const float DOUBLE_TAP_SLOP_PX = 30.0f;
 const Uint64 EDGE_PAN_DELAY_MS = 200;   // hold this long at an edge before scrolling starts
 const float EDGE_PAN_ZONE = 0.04f;      // normalized width of the edge strips
 const float EDGE_PAN_SPEED = 200.0f;    // matches the game's keyboard scroll amount
+// GeneralsX @bugfix seastwood 30/09/2026 Resting fingers (see touchYieldToNewFinger).
+const Uint64 TWO_FINGER_WINDOW_MS = 350; // a second finger later than this starts a new touch, not a pan
+const Uint64 RESTING_FINGER_MS = 800;    // a dragging finger that stayed put this long is resting
+const float STILL_RADIUS_PX = 6.0f;      // movement within this radius counts as staying put
 
 void sendSyntheticMouse(SDL3Mouse *mouse, SDL_Window *window, Uint32 type,
                         float x, float y, Uint8 button = 0, float wheelY = 0.0f)
@@ -260,6 +276,49 @@ void beginPan(SDL3Mouse *mouse, SDL_Window *window, int winW, int winH)
 	s_touch.phase = TouchState::PAN;
 }
 
+// GeneralsX @bugfix seastwood 30/09/2026 A new touch takes over from a finger resting on the glass.
+// Holding a phone in landscape, a thumb or the base of the palm often lies on the screen edge. That
+// is a real touch, so SDL keeps reporting it as down and the lost-lift recovery cannot catch it: it
+// became a long-press, an edge scroll or a drag, and every other touch was ignored until it lifted.
+// Input seemed to hang for as long as the hand stayed there. A finger that already finished its
+// action or has stayed put is now abandoned when another finger lands (its later events no longer
+// match the tracked finger and are ignored). Returns true when the translator is free for the new
+// touch. A second finger soon after the first is still a two-finger pan.
+bool touchYieldToNewFinger(SDL3Mouse *mouse, SDL_Window *window)
+{
+	const Uint64 now = SDL_GetTicks();
+	bool resting = false;
+	switch (s_touch.phase) {
+		case TouchState::IDLE:
+			return true;
+		case TouchState::LONGPRESSED:
+		case TouchState::EDGE_PAN:
+			resting = true;
+			break;
+		case TouchState::PENDING:
+			resting = now - s_touch.downTicks >= TWO_FINGER_WINDOW_MS;
+			break;
+		case TouchState::DRAGGING:
+			resting = now - s_touch.stillSince >= RESTING_FINGER_MS;
+			break;
+		default:
+			break;   // two-finger pan: extra fingers are ignored until it ends
+	}
+	if (!resting) {
+		return false;
+	}
+	fprintf(stderr, "INFO: touch: new touch takes over from a finger resting on the screen (gesture phase %d, down %u ms)\n",
+	        (int)s_touch.phase, (unsigned)(now - s_touch.downTicks));
+	if (s_touch.phase == TouchState::DRAGGING) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_touch.lastX, s_touch.lastY, SDL_BUTTON_LEFT);
+	}
+	if (s_touch.phase == TouchState::DRAGGING || s_touch.phase == TouchState::LONGPRESSED) {
+		TouchOverlay::onGameGestureEnded();
+	}
+	s_touch.phase = TouchState::IDLE;
+	return true;
+}
+
 void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &event)
 {
 	int winW = 0, winH = 0;
@@ -269,6 +328,7 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 
 	switch (event.type) {
 	case SDL_EVENT_FINGER_DOWN:
+		touchYieldToNewFinger(mouse, window);
 		if (s_touch.phase == TouchState::IDLE) {
 			// Defer all BUTTON output: a finger landing could become a tap, a
 			// drag-box, a long-press, or the first finger of a camera pan. A
@@ -282,6 +342,9 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 			s_touch.f1x = event.tfinger.x;
 			s_touch.f1y = event.tfinger.y;
 			s_touch.downTicks = SDL_GetTicks();
+			s_touch.stillX = px;
+			s_touch.stillY = py;
+			s_touch.stillSince = s_touch.downTicks;
 			// Move the cursor to the touch point NOW (motion clicks nothing, so the
 			// deferred-tap protection is intact). This lets the GUI process hover
 			// over the next frame(s) before the tap commits — hover-driven widgets
@@ -318,6 +381,11 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 			s_touch.f1y = event.tfinger.y;
 			s_touch.lastX = px;
 			s_touch.lastY = py;
+			if (SDL_fabsf(px - s_touch.stillX) + SDL_fabsf(py - s_touch.stillY) > STILL_RADIUS_PX) {
+				s_touch.stillX = px;
+				s_touch.stillY = py;
+				s_touch.stillSince = SDL_GetTicks();
+			}
 		} else if (s_touch.phase == TouchState::PAN && event.tfinger.fingerID == s_touch.finger2) {
 			s_touch.f2x = event.tfinger.x;
 			s_touch.f2y = event.tfinger.y;
@@ -532,6 +600,7 @@ struct CursorState {
 	enum Phase {
 		IDLE,        // no finger on the game
 		ONE,         // one finger: moving the cursor, may still become a tap or a hold-drag
+		HOLD,        // finger held still: a slide now drags, a lift clicks; no button sent yet
 		DRAG,        // hold-drag: left button held while the finger moves the cursor
 		TWO,         // two fingers: may become a right click, scrolls/zooms when they move
 		WAIT_LIFT    // gesture finished, remaining finger is ignored until it lifts
@@ -549,6 +618,8 @@ struct CursorState {
 	float travel = 0.0f;               // finger travel since the gesture started
 	float pinchDist = 0.0f;
 	Uint64 lastFrameTicks = 0;
+	float stillX = 0.0f, stillY = 0.0f;   // finger1 position when it last moved noticeably
+	Uint64 stillSince = 0;
 };
 
 CursorState s_cursor;
@@ -568,6 +639,7 @@ const float CURSOR_EDGE = 0.01f;              // normalized edge band that scrol
 // offset through the view plane independently of resolution; this keeps the map roughly under
 // the fingers at the default camera height.
 const float CURSOR_PAN_GAIN = 2.5f;
+const Uint64 CURSOR_RESTING_MS = 1000;        // a cursor finger that stayed put this long is resting
 
 bool cursorGestureIdle()
 {
@@ -592,7 +664,7 @@ void cursorPublish(int winW, int winH)
 {
 	if (winW > 0 && winH > 0) {
 		TouchOverlay::setCursorState(true, s_cursor.x / (float)winW, s_cursor.y / (float)winH,
-		                             s_cursor.phase == CursorState::DRAG);
+		                             s_cursor.phase == CursorState::HOLD || s_cursor.phase == CursorState::DRAG);
 	}
 }
 
@@ -627,6 +699,44 @@ void cursorPanCamera(float dx, float dy, int winW, int winH)
 	TheTacticalView->userScrollBy(&offset);
 }
 
+// GeneralsX @bugfix seastwood 30/09/2026 Same resting-finger takeover as the direct-touch translator
+// (see touchYieldToNewFinger). A resting thumb became a hold-drag with the left button held, and
+// every other touch was ignored until it lifted.
+bool cursorYieldToNewFinger(SDL3Mouse *mouse, SDL_Window *window)
+{
+	const Uint64 now = SDL_GetTicks();
+	bool resting = false;
+	switch (s_cursor.phase) {
+		case CursorState::IDLE:
+			return true;
+		case CursorState::HOLD:
+		case CursorState::WAIT_LIFT:
+			resting = true;
+			break;
+		case CursorState::ONE:
+			// A second finger normally makes a two-finger gesture, also while the first one rests on
+			// a target it just moved the cursor to; only a finger left there much longer is resting.
+			resting = now - s_cursor.stillSince >= CURSOR_RESTING_MS;
+			break;
+		case CursorState::DRAG:
+			resting = now - s_cursor.stillSince >= RESTING_FINGER_MS;
+			break;
+		default:
+			break;   // two fingers: extra fingers are ignored until they lift
+	}
+	if (!resting) {
+		return false;
+	}
+	fprintf(stderr, "INFO: touch: new touch takes over from a cursor finger resting on the screen (phase %d, down %u ms)\n",
+	        (int)s_cursor.phase, (unsigned)(now - s_cursor.downTicks));
+	if (s_cursor.phase == CursorState::DRAG) {
+		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP, s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
+		TouchOverlay::onGameGestureEnded();
+	}
+	s_cursor.phase = CursorState::IDLE;
+	return true;
+}
+
 // Returns true when the gesture produced a left click (the engine then updates the on-screen
 // keyboard for a click at the cursor, as it does for a direct tap).
 bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &event)
@@ -640,6 +750,7 @@ bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Even
 
 	switch (event.type) {
 	case SDL_EVENT_FINGER_DOWN:
+		cursorYieldToNewFinger(mouse, window);
 		if (s_cursor.phase == CursorState::IDLE) {
 			// A touch stops a gliding cursor, like putting a hand on a trackball.
 			s_cursor.vx = 0.0f;
@@ -651,6 +762,9 @@ bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Even
 			s_cursor.downTicks = now;
 			s_cursor.lastMoveTicks = now;
 			s_cursor.travel = 0.0f;
+			s_cursor.stillX = px;
+			s_cursor.stillY = py;
+			s_cursor.stillSince = now;
 			s_cursor.phase = CursorState::ONE;
 		} else if (s_cursor.phase == CursorState::ONE) {
 			s_cursor.finger2 = event.tfinger.fingerID;
@@ -665,13 +779,29 @@ bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Even
 		break;
 
 	case SDL_EVENT_FINGER_MOTION:
-		if ((s_cursor.phase == CursorState::ONE || s_cursor.phase == CursorState::DRAG) &&
+		if ((s_cursor.phase == CursorState::ONE || s_cursor.phase == CursorState::HOLD ||
+		     s_cursor.phase == CursorState::DRAG) &&
 		    event.tfinger.fingerID == s_cursor.finger1) {
 			const float dx = px - s_cursor.f1x;
 			const float dy = py - s_cursor.f1y;
 			s_cursor.f1x = px;
 			s_cursor.f1y = py;
 			s_cursor.travel += SDL_fabsf(dx) + SDL_fabsf(dy);
+			if (SDL_fabsf(px - s_cursor.stillX) + SDL_fabsf(py - s_cursor.stillY) > STILL_RADIUS_PX) {
+				s_cursor.stillX = px;
+				s_cursor.stillY = py;
+				s_cursor.stillSince = now;
+			}
+			if (s_cursor.phase == CursorState::HOLD) {
+				if (s_cursor.travel <= 2.0f * CURSOR_TAP_SLOP) {
+					s_cursor.lastMoveTicks = now;
+					break;   // jitter of a held finger: the cursor stays on its target
+				}
+				// The held finger slides: the drag starts where the cursor is.
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN, s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
+				s_cursor.phase = CursorState::DRAG;
+			}
 			const float dt = SDL_max(0.001f, (float)(now - s_cursor.lastMoveTicks) / 1000.0f);
 			s_cursor.lastMoveTicks = now;
 			const float fingerSpeed = SDL_sqrtf(dx * dx + dy * dy) / dt;
@@ -735,6 +865,19 @@ bool handleCursorTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Even
 					s_cursor.vx = 0.0f;
 					s_cursor.vy = 0.0f;
 				}
+				s_cursor.phase = CursorState::IDLE;
+				break;
+			case CursorState::HOLD:
+				if (event.tfinger.fingerID != s_cursor.finger1) {
+					break;
+				}
+				// Held and lifted without sliding: a left click.
+				if (!canceled) {
+					cursorClick(mouse, window, SDL_BUTTON_LEFT, winW, winH);
+					leftClicked = true;
+				}
+				s_cursor.vx = 0.0f;
+				s_cursor.vy = 0.0f;
 				s_cursor.phase = CursorState::IDLE;
 				break;
 			case CursorState::DRAG:
@@ -810,12 +953,12 @@ void updateCursorMode(SDL3Mouse *mouse, SDL_Window *window)
 		}
 	}
 
+	// A held finger arms a drag; the left button goes down only once it slides, so a finger that
+	// merely rests on the screen never holds the button.
 	if (s_cursor.phase == CursorState::ONE && s_cursor.travel <= CURSOR_TAP_SLOP &&
 	    now - s_cursor.downTicks >= CURSOR_HOLD_DRAG_MS) {
-		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, s_cursor.x, s_cursor.y);
-		sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN, s_cursor.x, s_cursor.y, SDL_BUTTON_LEFT);
 		TouchOverlay::addTapFeedback(s_cursor.x / (float)winW, s_cursor.y / (float)winH, false);
-		s_cursor.phase = CursorState::DRAG;
+		s_cursor.phase = CursorState::HOLD;
 	}
 
 	if (s_cursor.phase == CursorState::IDLE && dt > 0.0f &&
@@ -1182,6 +1325,12 @@ bool touchGestureIdle()
 	return s_cursorModeActive ? cursorGestureIdle() : s_touch.phase == TouchState::IDLE;
 }
 
+// Free the gesture translator for a new touch if its current finger is resting; true when idle.
+bool touchGestureYield(SDL3Mouse *mouse, SDL_Window *window)
+{
+	return s_cursorModeActive ? cursorYieldToNewFinger(mouse, window) : touchYieldToNewFinger(mouse, window);
+}
+
 } // anonymous namespace
 #endif // TARGET_OS_IPHONE
 
@@ -1402,6 +1551,20 @@ void SDL3GameEngine::pollSDL3Events(void)
 		return;
 	}
 
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+	// GeneralsX @tweak seastwood 30/09/2026 Log long gaps between input polls: touches are only
+	// read here, so a busy frame (loading, a save, a stall in the renderer) shows as an input hang.
+	{
+		static Uint64 s_lastPollTicks = 0;
+		const Uint64 pollTicks = SDL_GetTicks();
+		if (s_lastPollTicks != 0 && pollTicks - s_lastPollTicks >= 1000 && !iosShouldPauseRendering()) {
+			fprintf(stderr, "INFO: input: %u ms without reading input (the game was busy)\n",
+			        (unsigned)(pollTicks - s_lastPollTicks));
+		}
+		s_lastPollTicks = pollTicks;
+	}
+#endif
+
 	updateTextInputState();
 
 	SDL_Event event;
@@ -1512,7 +1675,14 @@ void SDL3GameEngine::pollSDL3Events(void)
 				{
 					// The floating keyboard button claims touches that start on it.
 					bool toggleKeyboard = false;
-					if (TouchOverlay::handleFingerEvent(event, touchGestureIdle(), toggleKeyboard)) {
+					bool gestureIdle = touchGestureIdle();
+					if (!gestureIdle && event.type == SDL_EVENT_FINGER_DOWN && TouchOverlay::controlAt(event)) {
+						SDL3Mouse* yieldMouse = TheMouse ? dynamic_cast<SDL3Mouse*>(TheMouse) : nullptr;
+						if (yieldMouse) {
+							gestureIdle = touchGestureYield(yieldMouse, m_SDLWindow);
+						}
+					}
+					if (TouchOverlay::handleFingerEvent(event, gestureIdle, toggleKeyboard)) {
 						if (toggleKeyboard) {
 							toggleOnScreenKeyboard();
 						}

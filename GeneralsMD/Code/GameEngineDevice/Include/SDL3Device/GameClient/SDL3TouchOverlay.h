@@ -35,6 +35,11 @@ namespace TouchOverlay {
 /// keyboard button should show or hide the on-screen keyboard.
 bool handleFingerEvent(const SDL_Event &event, bool gestureIdle, bool &toggleKeyboard);
 
+/// True when a finger-down event lands on an overlay control (toolbar, group column, keyboard
+/// button; not the D-pad). The engine then lets the new touch take over from a finger resting on
+/// the game before offering the event to handleFingerEvent.
+bool controlAt(const SDL_Event &event);
+
 /// Per-frame work: long-press timers, toolbar auto-collapse, releasing one-shot modifiers.
 void update(void);
 
